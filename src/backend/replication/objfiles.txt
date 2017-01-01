@@ -1,0 +1,2 @@
+src/backend/replication/logical/decode.o src/backend/replication/logical/logical.o src/backend/replication/logical/logicalfuncs.o src/backend/replication/logical/reorderbuffer.o src/backend/replication/logical/snapbuild.o
+src/backend/replication/walsender.o src/backend/replication/walreceiverfuncs.o src/backend/replication/walreceiver.o src/backend/replication/basebackup.o src/backend/replication/repl_gram.o src/backend/replication/slot.o src/backend/replication/slotfuncs.o src/backend/replication/syncrep.o

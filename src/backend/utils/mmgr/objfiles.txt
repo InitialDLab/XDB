@@ -1,0 +1,1 @@
+src/backend/utils/mmgr/aset.o src/backend/utils/mmgr/mcxt.o src/backend/utils/mmgr/portalmem.o
