@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+
+    <title>XDB: approXimate DB</title>
+
+    <!-- Bootstrap Core CSS -->
+    <link href="http://ajax.aspnetcdn.com/ajax/bootstrap/3.3.7/css/bootstrap.min.css" rel="stylesheet">
+
+    <!-- Custom CSS -->
+    <link href="css/one-page-wonder.css" rel="stylesheet">
+
+    <!-- HTML5 Shim and Respond.js IE8 support of HTML5 elements and media queries -->
+    <!-- WARNING: Respond.js doesn't work if you view the page via file:// -->
+    <!--[if lt IE 9]>
+        <script src="https://oss.maxcdn.com/libs/html5shiv/3.7.0/html5shiv.js"></script>
+        <script src="https://oss.maxcdn.com/libs/respond.js/1.4.2/respond.min.js"></script>
+    <![endif]-->
+
+</head>
+
+<body>
+
+    <!-- Navigation -->
+    <nav class="navbar navbar-inverse navbar-fixed-top" role="navigation">
+        <div class="container">
+            <!-- Brand and toggle get grouped for better mobile display -->
+            <div class="navbar-header">
+                <button type="button" class="navbar-toggle" data-toggle="collapse" data-target="#bs-example-navbar-collapse-1">
+                    <span class="sr-only">Toggle navigation</span>
+                    <span class="icon-bar"></span>
+                    <span class="icon-bar"></span>
+                    <span class="icon-bar"></span>
+                </button>
+                <a class="navbar-brand" href="#">XDB</a>
+            </div>
+            <!-- Collect the nav links, forms, and other content for toggling -->
+            <div class="collapse navbar-collapse" id="bs-example-navbar-collapse-1">
+                <ul class="nav navbar-nav">
+                    <li>
+                        <a href="#features">Features</a>
+                    </li>
+                    <li>
+                        <a href="#publications">Publications</a>
+                    </li>
+                    <li>
+                        <a href="#people">People</a>
+                    </li>
+                </ul>
+            </div>
+            <!-- /.navbar-collapse -->
+        </div>
+        <!-- /.container -->
+    </nav>
+
+    <!-- Full Width Image Header -->
+    <header class="header-image">
+        <div class="headline">
+            <div class="container">
+                <h1>XDB: approXimate DB</h1>
+                <h2>XDB is a database that supports online aggregation using
+                    the wander join algorithm, based on the tranditional RDBMS
+                    database, PostgreSQL. It supports online aggregation query
+                    written in SQL with ONLINE keyword. It also features a query
+                    optimizer that optimizes wander join execution plans.</h2>
+                <a href="https://github.com/InitialDLab/XDB" class="btn btn-primary btn-lg active" aria-pressed=true>Source Code</a>
+            </div>
+        </div>
+    </header>
+
+    <!-- Page Content -->
+    <div class="container">
+
+        <hr class="featurette-divider">
+
+        <div class="featurette" id="features">
+            <div class="row">
+                <div class="col-lg-6">
+                  <img class="img_responsive center-block" src="imgs/xdb-bound-image.png" height=200>
+                  <h2>Online Aggregation</h2>
+                  <p>XDB reports unbiased estimators and confidence intervals
+                  periodically for an aggregation query. The confidence interval
+                  shrinks over time. The true result is within the confidence
+                  interval with high confidence.</p>
+                </div><!-- /.col-lg-6 -->
+                <div class="col-lg-6">
+                  <img class="img_responsive center-block" src="imgs/xdb-sql.png" width=500 height=200>
+                  <h2>SQL Syntax</h2>
+                  <p>Online aggregation queries are written in SQL with a few additional keywords.
+                  The example query finds the total revenue loss due to returned goods in a TPC-H dataset.
+                  The online aggregation query will be run for 60000 milliseconds
+                  and results are reported every 1000 milliseconds. The confidence
+                  interval is computed with confidence of 95%.</p>
+                </div><!-- /.col-lg-6 -->
+            </div><!-- /.row -->
+
+            <div class="row">
+                <div class="col-lg-6">
+                  <img class="img_responsive center-block" src="imgs/xdb-psql.png" width=500 height=200>
+                  <h2>PSQL Frontend</h2>
+                  <p>Online aggregation queries can be issued in a PSQL frontend
+                  and the results are reported at the end of the queries. </p>
+                </div><!-- /.col-lg-6 -->
+                <div class="col-lg-6">
+                  <img class="img_responsive center-block" src="imgs/xdb-zeppelin.png" height=200>
+                  <h2>Apache Zeppelin Frontend</h2>
+                  <p>We also have a 
+                  <a href="https://github.com/InitialDLab/zeponline">modified
+                      Apache Zeppelin</a> frontend, which allows users to launch
+                  online aggregation queries in a web frontend and see the
+                  improvement of the results as the query is being executed.</p>
+                </div><!-- /.col-lg-6 -->
+            </div><!-- /.row -->
+        </div>
+
+        <hr class="featurette-divider">
+
+        <div class="featurette" id="publications">
+            <h2>Publications</h2>
+            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+            <small><i>* authors in alphabetic order</i></small>
+            <ul>
+                <li>* <a href="files/papers/wanderjoin.pdf">Wander Join: Online Aggregation via Random Walks</a>, <strong>Best Paper Award</strong><br>
+                by F. Li, B. Wu, K. Yi, Z. Zhao<br>
+                In Proceedings of 35th ACM SIGMOD International Conference on 
+                Management of Data (<strong>SIGMOD 2016</strong>), pages 615-629,
+                San Francisco, USA, June 2016.
+                </li>
+                <li>* <a href="files/papers/wanderjoin-demo.pdf">Wander Join: Online Aggregation for Joins</a>
+                by F. Li, B. Wu, K. Yi, Z. Zhao<br>
+                In Proceedings of 35th ACM SIGMOD International Conference on 
+                Management of Data, Demo Paper, (<strong>SIGMOD 2016</strong>),
+                pages 2121-2124, San Francisco, USA, June 2016.
+                </li>
+            </ul>
+        </div>
+
+        <hr class="featurette-divider">
+
+        <div class="featurette" id="people">
+            <h2>People</h2>
+            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+            <div class="col-lg-4">
+                <img src="imgs/school.png" class="pull-right"></img>
+            </div>
+            <div class="col-lg-8">
+                <ul>
+                    <li><a href="http://www.cs.utah.edu/~lifeifei/">Feifei Li</a>: lifeifei [at] cs [dot] utah [dot] edu</li>
+                    <li>Bin Wu: bwuac [at] cse [dot] ust [dot] hk</li>
+                    <li><a href="https://www.cse.ust.hk/~yike/">Ke Yi</a>: yike [at] cse [dot] ust [dot] hk</li>
+                    <li><a href="http://www.cs.utah.edu/~zyzhao">Zhuoyue Zhao</a>: zyzhao [at] cs [dot] utah [dot] edu</li>
+                </ul>
+            </div>
+        </div>
+
+        <hr class="featurette-divider">
+
+        <!-- Footer -->
+        <footer>
+            <div class="row">
+                <div class="col-lg-12">
+                    <p>Copyright &copy; InitialD Lab, University of Utah, 2017</p>
+                </div>
+            </div>
+        </footer>
+
+    </div>
+    <!-- /.container -->
+
+    <!-- jQuery -->
+    <script src="http://ajax.aspnetcdn.com/ajax/jQuery/jquery-1.9.1.min.js"></script>
+
+    <!-- Bootstrap Core JavaScript -->
+    <script src="http://ajax.aspnetcdn.com/ajax/bootstrap/3.3.7/bootstrap.min.js"></script>
+
+</body>
+
+</html>
