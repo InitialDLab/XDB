@@ -71,7 +71,7 @@ make commercial use of XDB, please contact the authors.
 
 ## Authors
 
-Zhuoyue Zhao: zyzhao [at] cs [dot] utah [dot] edu (contact author)
+Zhuoyue Zhao: zyzhao [at] cs [dot] utah [dot] edu (contact author) <br/>
 Bin Wu: bwuac [at] cse [dot] ust [dot] hk <br/>
 Feifei Li: lifeifei [at] cs [dot] utah [dot] edu <br/>
 Ke Yi: yike [at] cse [dot] ust [dot] hk <br/>
