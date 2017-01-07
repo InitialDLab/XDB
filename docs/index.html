@@ -85,7 +85,7 @@
                   <h2>Online Aggregation</h2>
                   <p>XDB reports unbiased estimators and confidence intervals
                   periodically for an aggregation query. The confidence interval
-                  shrinks over time. The true result is within the confidence
+                  shrinks over time. The true result Y is within the confidence
                   interval with high confidence.</p>
                 </div><!-- /.col-lg-6 -->
                 <div class="col-lg-6">
@@ -93,21 +93,21 @@
                   <h2>SQL Syntax</h2>
                   <p>Online aggregation queries are written in SQL with a few additional keywords.
                   The example query finds the total revenue loss due to returned goods in a TPC-H dataset.
-                  The online aggregation query will be run for 60000 milliseconds
-                  and results are reported every 1000 milliseconds. The confidence
+                  The online aggregation query will be run for 60000 <strong>milliseconds</strong>
+                  and results are reported every 1000 <strong>milliseconds</strong>. The confidence
                   interval is computed with confidence of 95%.</p>
                 </div><!-- /.col-lg-6 -->
             </div><!-- /.row -->
 
             <div class="row">
                 <div class="col-lg-6">
-                  <img class="img_responsive center-block" src="imgs/xdb-psql.png" width=500 height=200>
+                  <img class="img_responsive center-block" src="imgs/xdb-psql.png" width=535 height=322>
                   <h2>PSQL Frontend</h2>
                   <p>Online aggregation queries can be issued in a PSQL frontend
                   and the results are reported at the end of the queries. </p>
                 </div><!-- /.col-lg-6 -->
                 <div class="col-lg-6">
-                  <img class="img_responsive center-block" src="imgs/xdb-zeppelin.png" height=200>
+                  <img class="img_responsive center-block" src="imgs/xdb-zeppelin.png">
                   <h2>Apache Zeppelin Frontend</h2>
                   <p>We also have a 
                   <a href="https://github.com/InitialDLab/zeponline">modified
@@ -150,10 +150,10 @@
             </div>
             <div class="col-lg-8">
                 <ul>
-                    <li><a href="http://www.cs.utah.edu/~lifeifei/">Feifei Li</a>: lifeifei [at] cs [dot] utah [dot] edu</li>
+                    <li><a href="http://www.cs.utah.edu/~zyzhao">Zhuoyue Zhao</a>: zyzhao [at] cs [dot] utah [dot] edu (contact author)</li>
                     <li>Bin Wu: bwuac [at] cse [dot] ust [dot] hk</li>
+                    <li><a href="http://www.cs.utah.edu/~lifeifei/">Feifei Li</a>: lifeifei [at] cs [dot] utah [dot] edu</li>
                     <li><a href="https://www.cse.ust.hk/~yike/">Ke Yi</a>: yike [at] cse [dot] ust [dot] hk</li>
-                    <li><a href="http://www.cs.utah.edu/~zyzhao">Zhuoyue Zhao</a>: zyzhao [at] cs [dot] utah [dot] edu</li>
                 </ul>
             </div>
         </div>
