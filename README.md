@@ -2,7 +2,9 @@ approXimate DataBase (XDB)
 =========================
 
 XDB integrates the wander join algorithm into PostgreSQL 9.4.2 to support
-online aggregation queries.
+online aggregation queries. The main difference between the TODS version and
+SIGMOD version is we use a standard B-tree instead of a counting B-tree to draw
+random samples. Sampling in each join step is almost but not strictly uniform.
 
 ## Build
 

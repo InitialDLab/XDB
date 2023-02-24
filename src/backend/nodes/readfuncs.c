@@ -375,7 +375,8 @@ _readQuery(void)
 	READ_BOOL_FIELD(hasAggs);
 
 	READ_BOOL_FIELD(hasOnline);
-	READ_BOOL_FIELD(adaptive);
+    READ_BOOL_FIELD(allow_push_down_agg);
+    READ_BOOL_FIELD(allow_push_down_filter);
 	READ_UINT_FIELD(withTime);
 	READ_UINT_FIELD(confidence);
 	READ_UINT_FIELD(reportInterval);

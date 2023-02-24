@@ -37,7 +37,6 @@
 #include "utils/timestamp.h"
 #include "access/nbtree.h"
 #include "utils/xql_math.h"
-#include "utils/avltree.h"
 
 typedef struct OnlineAggHashEntryData *OnlineAggHashEntry;
 
@@ -51,12 +50,15 @@ typedef struct OnlineAggHashEntryData {
 
 static void onlineagg_init_pergroups(
 		OnlineAggState *state,
+        List *peraggs,
 		OnlineAgg_NumericAggPerGroupState **pergroups);
+static void 
+onlineagg_init_partial_pergroups(
+    OnlineAggState *state,
+    List *peraggs,
+    OnlineAgg_PartialNumericAggPerGroupState **partial_pergroups);
 static void init_online_sample_join(OnlineSampleJoin *node, EState *estate, int eflags,
 									OnlineSampleJoinState *state);
-static void init_adaptive_online_sample_join(OnlineSampleJoin *node, 
-											 EState *estate, int eflags,
-											AdaptiveOnlineSampleJoinState *state);
 static OnlineSampleJoinState *online_reinit_join(
 		OnlineSampleJoinState *state, OnlineSampleJoin *node);
 static Datum online_relqual_scalarVarEval(ExprState *expression, ExprContext *econtext,
@@ -83,21 +85,39 @@ static void onlineagg_output_pergroups(OnlineAggState *state,
 static void onlineagg_output_separator(OnlineAggState *state);
 static void onlineagg_advance_pergroups(OnlineAggState *state, 
 							TupleTableSlot *slot,
+                            List *peraggs,
 							OnlineAgg_NumericAggPerGroupState **pergroups,
-							uint64 *nsampled);
+							uint64 *nsampled,
+                            uint64 *ntotal_sampled);
+static void onlineagg_reset_partial_pergroups(
+    OnlineAggState *state,
+    List *peraggs,
+    OnlineAgg_PartialNumericAggPerGroupState **partial_pergroups);
+static void onlineagg_advance_partial_pergroups(
+        OnlineAggState *state, 
+		TupleTableSlot *slot,
+        List *peraggs,
+		OnlineAgg_PartialNumericAggPerGroupState **partial_pergroups);
+static void onlineagg_add_partial_pergroups_to_pergroups(
+    OnlineAggState *state,
+    List *peraggs,
+    OnlineAgg_NumericAggPerGroupState **pergroups,
+    OnlineAgg_PartialNumericAggPerGroupState **partial_pergroups,
+    uint64 *nsampled,
+    uint64 *ntotal_sampled);
 static TupleTableSlot *onlineagg_exec_planselection(OnlineAggState *state);
 static void onlineagg_output_planselection(OnlineAggState *state,
 							   OnlineSampleJoin *join_plan,
+                               uint64 ntotal_sample,
 							   uint64 nrejected,
+                               double estimator_variance,
 							   int64 time_elapsed);
 static void online_sample_join_set_outputs(OnlineSampleJoinState *state);
 static TupleTableSlot *online_sample_from_btree(OnlineSampleJoinState *state, int i);
 static void online_eval_runtime_keys(ExprContext *econtext, 
 							IndexRuntimeKeyInfo *runtime_keys,
 							int n_runtime_keys);
-static HeapTuple online_fetch_heap(OnlineSampleJoinState *state, BTSampleState sstate, int i);
-
-static int online_avltree_cmp(TupleTableSlot *slot1, TupleTableSlot *slot2, void *cxt);
+static HeapTuple online_fetch_heap(OnlineSampleJoinState *state, ItemPointer tid, int i);
 
 static int64 online_timestamp_diff_millisecond(TimestampTz start_time, TimestampTz end_time) {
 	long secs;
@@ -115,6 +135,8 @@ ExecInitOnlineAgg(OnlineAgg *node, EState *estate, int eflags) {
 	aggstate = makeNode(OnlineAggState);
 	aggstate->ps.state = estate;
 	aggstate->ps.plan = (Plan *) node;
+    aggstate->push_down_agg = node->push_down_agg;
+    aggstate->push_down_filter = node->push_down_filter;
 
 	aggstate->aggcontext = AllocSetContextCreate(CurrentMemoryContext, "OnlineAggContext",
 												 ALLOCSET_DEFAULT_MINSIZE,
@@ -126,15 +148,13 @@ ExecInitOnlineAgg(OnlineAgg *node, EState *estate, int eflags) {
 		OnlineSampleJoin *join_plan = linitial(node->candidate_join_plans);
 		aggstate->next_plan_cell = list_head(node->candidate_join_plans);
 		aggstate->best_plan = NULL;
-		aggstate->nrejected_best_plan = aggstate->nInitSamples;
+		aggstate->variance_best_plan = XQL_DOUBLE_INF;
 		aggstate->join_state = ExecInitOnlineSampleJoin(join_plan, estate, eflags);
-		aggstate->join_state->forOutputs = false;
 	}
 	else {
 		OnlineSampleJoin *join_plan = linitial(node->candidate_join_plans);
 		aggstate->next_plan_cell = NULL;
 		aggstate->join_state = ExecInitOnlineSampleJoin(join_plan, estate, eflags);
-		aggstate->join_state->forOutputs = true;
 	}
 	
 	
@@ -213,8 +233,13 @@ ExecInitOnlineAgg(OnlineAgg *node, EState *estate, int eflags) {
 		aggstate->hasGrouping = false;
 		aggstate->pergroups = (OnlineAgg_NumericAggPerGroupState **) 
 			palloc0(sizeof(OnlineAgg_NumericAggPerGroupState *) * aggstate->naggs);
+		onlineagg_init_pergroups(aggstate, aggstate->peraggs, aggstate->pergroups);
 
-		onlineagg_init_pergroups(aggstate, aggstate->pergroups);
+        if (node->push_down_agg) {
+            aggstate->partial_pergroups = (OnlineAgg_PartialNumericAggPerGroupState **)
+                palloc0(sizeof(OnlineAgg_PartialNumericAggPerGroupState *) * aggstate->naggs);
+            onlineagg_init_partial_pergroups(aggstate, aggstate->peraggs, aggstate->partial_pergroups);
+        }
 	}
 	aggstate->ntotal_sampled = 0;
 	
@@ -225,10 +250,10 @@ ExecInitOnlineAgg(OnlineAgg *node, EState *estate, int eflags) {
 
 static void onlineagg_init_pergroups(
 		OnlineAggState *state,
+        List *peraggs,
 		OnlineAgg_NumericAggPerGroupState **pergroups) {
 	
 	ListCell *lc;
-	List *peraggs = state->peraggs;
 	int i = 0;
 
 	foreach(lc, peraggs) {
@@ -237,6 +262,22 @@ static void onlineagg_init_pergroups(
 
 		pergroups[i++] = peragg->initfunc(state->aggcontext, peragg);
 	}
+}
+
+static void 
+onlineagg_init_partial_pergroups(
+    OnlineAggState *state,
+    List *peraggs,
+    OnlineAgg_PartialNumericAggPerGroupState **partial_pergroups) {
+    
+    ListCell *lc;
+    int i = 0;
+
+    foreach(lc, peraggs) {
+        OnlineAgg_NumericAggPerAggState *peragg = 
+            (OnlineAgg_NumericAggPerAggState *) lfirst(lc);
+        partial_pergroups[i++] = peragg->partial_initfunc(state->aggcontext, peragg);
+    }
 }
 
 static void
@@ -256,6 +297,7 @@ init_online_sample_join(OnlineSampleJoin *node, EState *estate, int eflags,
 		state->n_joinkeys = (int *) palloc(sizeof(int) * (state->nrels + 1));
 		state->join_keys = (ScanKey *) palloc(sizeof(ScanKey) * (state->nrels + 1));
 		state->rel_quals = (List **) palloc(sizeof(List *) * (state->nrels + 1));
+        state->len_rel_quals = (int *) palloc(sizeof(int) * (state->nrels + 1));
 		state->runtime_keys = (IndexRuntimeKeyInfo **)
 								palloc(sizeof(IndexRuntimeKeyInfo *) * (state->nrels + 1));
 		state->n_runtime_keys = (int *) palloc(sizeof(int) * (state->nrels + 1));
@@ -263,7 +305,7 @@ init_online_sample_join(OnlineSampleJoin *node, EState *estate, int eflags,
 		state->rel_qual_ctx = CreateExprContext(estate);
 		state->rel_qual_ctx->ecxt_reltuples = state->tuples;
 		state->sample_state = (BTSampleState *) palloc0(sizeof(BTSampleState) * (state->nrels + 1));
-		state->inv_prob = (uint64 *) palloc(sizeof(uint64) * (state->nrels + 1));
+		state->inv_prob = (double *) palloc(sizeof(double) * (state->nrels + 1));
 
 		state->buf = (Buffer *) palloc(sizeof(Buffer) * (state->nrels + 1));
 		state->heap_tup = (HeapTupleData *) palloc(sizeof(HeapTupleData) * (state->nrels + 2));
@@ -276,6 +318,7 @@ init_online_sample_join(OnlineSampleJoin *node, EState *estate, int eflags,
 		state->n_joinkeys[0] = 0;
 		state->join_keys[0] = NULL;
 		state->rel_quals[0] = NIL;
+        state->len_rel_quals[0] = 0;
 		state->runtime_keys[0] = NULL;
 		state->n_runtime_keys[0] = 0;
 		for (i = 1; i <= state->nrels; ++i) {
@@ -311,7 +354,9 @@ init_online_sample_join(OnlineSampleJoin *node, EState *estate, int eflags,
 		ExecClearTuple(state->outputs);
 		MemoryContextReset(state->perPlanContext);
 	}
-
+    state->fetch_all_from_last = node->fetch_all_from_last;
+    state->fetch_ready = false;
+    state->sample_from_filtered = node->sample_from_filtered;
 	
 	for (i = 1; i <= state->nrels; ++i) {
 		Relation heap;
@@ -362,6 +407,7 @@ init_online_sample_join(OnlineSampleJoin *node, EState *estate, int eflags,
 		List *rel_quals = NIL;
 		ListCell *lc;
 		ExprState *expr_state;
+        int len_rel_quals;
 
 		/* init join quals */
 		state->n_runtime_keys[i] = 0;
@@ -372,14 +418,17 @@ init_online_sample_join(OnlineSampleJoin *node, EState *estate, int eflags,
 								 &state->runtime_keys[i], &state->n_runtime_keys[i]);
 		
 		/* initialize rel quals */
+        len_rel_quals = 0;
 		foreach(lc, node->rel_quals[i]) {
 			Expr *qual = (Expr *) lfirst(lc);
 
 			expr_state = online_ExecInitExpr(qual, (PlanState *) state,
 											 online_relqual_scalarVarEval);
 			rel_quals = lappend(rel_quals, expr_state);
+            len_rel_quals++;
 		}
 		state->rel_quals[i] = rel_quals;
+        state->len_rel_quals[i] = len_rel_quals;
 	}
 
 	/* initialize output expr states (in perPlanContext) */
@@ -399,112 +448,21 @@ init_online_sample_join(OnlineSampleJoin *node, EState *estate, int eflags,
 	MemoryContextSwitchTo(oldcontext);
 }
 
-static void
-init_adaptive_online_sample_join(OnlineSampleJoin *node, EState *estate, int eflags,
-								 AdaptiveOnlineSampleJoinState *state) {
-	
-	uint32	nrels = node->nrel, 
-			i;
-	MemoryContext oldcontext;
-	OnlineSampleJoinState *ostate = (OnlineSampleJoinState *) state;
-	
-	if (!state->initialized) {
-		state->ainfo = (OnlineAgg_adaptive_info_t *) 
-					palloc(sizeof(OnlineAgg_adaptive_info_t) * (nrels + 1));
-		
-		/* find bt compare routines */
-		state->pk_ncolumns = (int *) palloc(sizeof(int) * (nrels + 1));
-		state->pk_attno = (int **) palloc(sizeof(int **) * (nrels + 1));
-		state->pk_collation = (Oid **) palloc(sizeof(Oid *) * (nrels + 1));
-		state->pk_fmgrinfo = (FmgrInfo **) palloc(sizeof(FmgrInfo *) * (nrels + 1));
-
-		state->pk_ncolumns[0] = 0;
-		state->pk_attno[0] = NULL;
-		state->pk_collation[0] = NULL;
-		state->pk_fmgrinfo[0] = NULL;
-
-		/* set up wtree context */
-		state->wtree_context = AllocSetContextCreate(CurrentMemoryContext, 
-													"AdaptiveOnlineAggWTreeContext",
-													 ALLOCSET_DEFAULT_MINSIZE,
-													 ALLOCSET_DEFAULT_INITSIZE,
-													 ALLOCSET_DEFAULT_MAXSIZE);
-		state->join_path = (avlnode **) palloc(sizeof(avlnode *) * (nrels + 1));
-		state->initialized = true;	
-	}
-	
-	oldcontext = MemoryContextSwitchTo(ostate->perPlanContext);
-
-	for (i = 1; i <= nrels; ++i) {
-		IndexOptInfo *iinfo = node->primaryindex_info[i];
-		Oid opfuncid;
-		int ncolumns, j;
-		
-		ncolumns = iinfo->ncolumns;
-		state->pk_ncolumns[i] = ncolumns;
-		state->pk_attno[i] = iinfo->indexkeys;
-		state->pk_collation[i] = iinfo->indexcollations;
-		
-
-		state->pk_fmgrinfo[i] = (FmgrInfo *) palloc(sizeof(FmgrInfo) * ncolumns);
-		for (j = 0; j < ncolumns; ++j) {
-			opfuncid = get_opfamily_proc(iinfo->opfamily[j],
-										 iinfo->opcintype[j],
-										 iinfo->opcintype[j],
-										 BTORDER_PROC); 
-			fmgr_info(opfuncid, &state->pk_fmgrinfo[i][j]);
-		}
-	}
-
-	MemoryContextSwitchTo(oldcontext);
-		
-	MemoryContextReset(state->wtree_context);
-	state->wtree_root = NULL;
-	state->slots = NIL;	
-}
-
 OnlineSampleJoinState *
 ExecInitOnlineSampleJoin(OnlineSampleJoin *node, EState *estate, int eflags) {
-	if (node->adaptive) {
-		AdaptiveOnlineSampleJoinState *astate;
-		OnlineSampleJoinState *state;
+    OnlineSampleJoinState *state;
 
-		astate = makeNode(AdaptiveOnlineSampleJoinState);
-		state = (OnlineSampleJoinState *) astate;
-		state->initialized = false;
-		astate->initialized = false;
+    state = makeNode(OnlineSampleJoinState);
+    state->initialized = false;
 
-		init_online_sample_join(node, estate, eflags, (OnlineSampleJoinState *) astate);
-		
-		init_adaptive_online_sample_join(node, estate, eflags, astate);
-		return (OnlineSampleJoinState *) astate;
-	}
-	else {
-		OnlineSampleJoinState *state;
-
-		state = makeNode(OnlineSampleJoinState);
-		state->initialized = false;
-
-		init_online_sample_join(node, estate, eflags, state);
-		return state;
-	}
+    init_online_sample_join(node, estate, eflags, state);
+    return state;
 }
 
 static OnlineSampleJoinState *
 online_reinit_join(OnlineSampleJoinState *state, OnlineSampleJoin *node) {
-	if (IsA(state, OnlineSampleJoinState)) {
-		Assert(!node->adaptive);
 
-		init_online_sample_join(node, state->ps.state, 0, state);
-	}
-	else {
-		Assert(node->adaptive);
-
-		init_online_sample_join(node, state->ps.state, 0, state);
-		init_adaptive_online_sample_join(node, state->ps.state, 0, 
-				(AdaptiveOnlineSampleJoinState *) state);
-	}
-	
+	init_online_sample_join(node, state->ps.state, 0, state);
 	return state;
 }
 
@@ -695,7 +653,7 @@ onlineagg_initialize_resulttupleslot(
 	ListCell *lc;
 	int ntargets = list_length(tlist);
 	int withPlanSelection = (aggstate->nInitSamples > 0) ? 1 : 0;
-	int ncols = withPlanSelection + 3 + aggstate->naggs + ntargets;
+	int ncols = withPlanSelection * 2 + 3 + aggstate->naggs + ntargets;
 	
 	ExecInitResultTupleSlot(estate, planstate);
 	slot = planstate->ps_ResultTupleSlot;
@@ -715,6 +673,9 @@ onlineagg_initialize_resulttupleslot(
     
     /* column number of rejected samples (int64) */
     TupleDescInitEntry(tupdesc, i++, "nrejected", INT8OID, 0, 0);
+
+    if (withPlanSelection)
+        TupleDescInitEntry(tupdesc, i++, "variance", FLOAT8OID, 0, 0);
 
 	foreach(lc, tlist) {
 		TargetEntry *tle = (TargetEntry *) lfirst(lc);
@@ -799,9 +760,10 @@ onlineagg_fill_hash_table(OnlineAggState *state) {
 		else {
 			entry = online_sample_lookup_hash_entry(state, slot);
 		
-			onlineagg_advance_pergroups(state, slot, 
+			onlineagg_advance_pergroups(state, slot, state->peraggs,
 										entry->pergroups,
-										&entry->nsampled);
+										&entry->nsampled,
+                                        &state->ntotal_sampled);
 		}
 	} while ((now_time = GetCurrentTimestamp()) < end_time);
 
@@ -838,7 +800,7 @@ online_sample_lookup_hash_entry(OnlineAggState *state, TupleTableSlot *keyslot) 
 	if (isnew) {
 		/* init. agg for the new entry */
 		entry->nsampled = 0;
-		onlineagg_init_pergroups(state, entry->pergroups);
+		onlineagg_init_pergroups(state, state->peraggs, entry->pergroups);
 	}
 
 	return entry;
@@ -876,16 +838,48 @@ onlineagg_exec_no_grouping(OnlineAggState *state) {
 	state->timeout_time += plan->reportInterval;
 	if (plan->withTime < state->timeout_time) state->timeout_time = plan->withTime;
 	end_time = TimestampTzPlusMilliseconds(start_time, state->timeout_time - state->time_elapsed);
-
+    
 	/* run sampling until timeout */
 	do {
 		TupleTableSlot *slot;
 
 		slot = ExecProcNode((PlanState *) state->join_state);
 
-		onlineagg_advance_pergroups(state, slot, 
-									state->pergroups,
-									&state->nsampled);
+        if (state->push_down_agg && state->join_state->fetch_ready) {
+            /* If we see no non null tuple in the leaf level, 
+             * it is essentially treated as a rejected sample. */
+            bool seen_non_null = false;
+            do {
+                if (NULL != slot) {
+                    if (!seen_non_null) {
+                        onlineagg_reset_partial_pergroups(
+                            state, state->peraggs, state->partial_pergroups);
+                        seen_non_null = true;
+                    }
+                    onlineagg_advance_partial_pergroups(
+                        state, slot, state->peraggs, state->partial_pergroups);
+                }
+		        slot = ExecProcNode((PlanState *) state->join_state);
+            } while (state->join_state->fetch_ready);
+
+            if (seen_non_null) {
+                onlineagg_add_partial_pergroups_to_pergroups(state, state->peraggs,
+                        state->pergroups, state->partial_pergroups,
+                        &state->nsampled, &state->ntotal_sampled);
+            } else {
+                onlineagg_advance_pergroups(state, NULL, state->peraggs,
+                        state->pergroups,
+                        &state->nsampled,
+                        &state->ntotal_sampled);
+            }
+        } else {
+            /* either we are not doing agg at the leaf level or 
+             * there are no tuples in the final level (a rejection) */
+            onlineagg_advance_pergroups(state, slot, state->peraggs,
+                                        state->pergroups,
+                                        &state->nsampled,
+                                        &state->ntotal_sampled);
+        }
 	} while ((now_time = GetCurrentTimestamp()) < end_time);
 
 	state->time_elapsed += online_timestamp_diff_millisecond(start_time, now_time);
@@ -932,12 +926,17 @@ onlineagg_output_pergroups(OnlineAggState *state,
 	slot->tts_isnull[i++] = false;
 
 	/* column nsamples */
-	slot->tts_values[i] = Int64GetDatumFast(nsampled);
+	slot->tts_values[i] = Int64GetDatumFast(state->ntotal_sampled);
 	slot->tts_isnull[i++] = false;
 
     /* column nrejected */
     slot->tts_values[i] = Int64GetDatumFast(state->ntotal_sampled - nsampled);
     slot->tts_isnull[i++] = false;
+
+    if (state->nInitSamples > 0) {
+        slot->tts_values[i] = PointerGetDatum(NULL);
+        slot->tts_isnull[i++] = true;
+    }
 
 	j = 0;
 	foreach(lc, target_states) {
@@ -996,155 +995,264 @@ onlineagg_output_separator(OnlineAggState *state) {
 static void
 onlineagg_advance_pergroups(OnlineAggState *state, 
 							TupleTableSlot *slot,
+                            List *peraggs,
 							OnlineAgg_NumericAggPerGroupState **pergroups,
-							uint64 *nsampled) {
+							uint64 *nsampled,
+                            uint64 *ntotal_sampled) {
 	
 	int i;
-	List *peraggs = state->peraggs;
 	ListCell *lc;
 	ExprContext *econtext = state->expr_ctx;;
+    
+    ++*ntotal_sampled;
+    if (NULL == slot) {
+        i = 0;
+        foreach(lc, peraggs) {
+            OnlineAgg_NumericAggPerAggState *peragg = 
+                (OnlineAgg_NumericAggPerAggState *) lfirst(lc);
+            
+            peragg->transfunc(pergroups[i], peragg, 
+                    PointerGetDatum(NULL), true, NULL, 0);
+            ++i;
+        }
+    }
 
-	
-	++state->ntotal_sampled;
-	if (IsA(state->join_state, OnlineSampleJoinState)) {
-		if (NULL == slot) {
-			i = 0;
-			foreach(lc, peraggs) {
-				OnlineAgg_NumericAggPerAggState *peragg = 
-					(OnlineAgg_NumericAggPerAggState *) lfirst(lc);
-				
-				peragg->transfunc(pergroups[i], peragg, 
-						PointerGetDatum(NULL), true, NULL, 0);
-				++i;
-			}
-		}
+    else {
+        OnlineSampleJoinState *join_state = state->join_state;
+        MemoryContext oldcontext;
 
-		else {
-			OnlineSampleJoinState *join_state = state->join_state;
-			MemoryContext oldcontext;
+        ResetExprContext(econtext);
+        econtext->ecxt_outertuple = slot;
 
-			ResetExprContext(econtext);
-			econtext->ecxt_outertuple = slot;
+        oldcontext = MemoryContextSwitchTo(econtext->ecxt_per_tuple_memory);
+        
+        i = 0;
+        foreach(lc, peraggs) {
+            OnlineAgg_NumericAggPerAggState *peragg = 
+                (OnlineAgg_NumericAggPerAggState *) lfirst(lc);
+            
+            Datum value;
+            bool isNull;
+                
+            if (peragg->expr_state != NULL) {
+                value = ExecEvalExpr(peragg->expr_state, econtext, &isNull, NULL);
+            }
+            else {
+                value = PointerGetDatum(NULL);	/* to suppress compiler warning */
+                isNull = false;
+            }
 
-			oldcontext = MemoryContextSwitchTo(econtext->ecxt_per_tuple_memory);
-			
-			i = 0;
-			foreach(lc, peraggs) {
-				OnlineAgg_NumericAggPerAggState *peragg = 
-					(OnlineAgg_NumericAggPerAggState *) lfirst(lc);
-				
-				Datum value;
-				bool isNull;
-					
-				if (peragg->expr_state != NULL) {
-					value = ExecEvalExpr(peragg->expr_state, econtext, &isNull, NULL);
-				}
-				else {
-					value = PointerGetDatum(NULL);	/* to suppress compiler warning */
-					isNull = false;
-				}
+            peragg->transfunc(pergroups[i], peragg,
+                    value, isNull, join_state->inv_prob, join_state->nrels);
 
-				peragg->transfunc(pergroups[i], peragg,
-						value, isNull, join_state->inv_prob, join_state->nrels);
+            ++i;
+        }
 
-				++i;
-			}
+        MemoryContextSwitchTo(oldcontext);
+        ++*nsampled;
+    }
+}
 
-			MemoryContextSwitchTo(oldcontext);
-			++*nsampled;
-		}
-	}
+static void
+onlineagg_reset_partial_pergroups(
+    OnlineAggState *state,
+    List *peraggs,
+    OnlineAgg_PartialNumericAggPerGroupState **partial_pergroups) {
+    
+	int i = 0;
+	ListCell *lc;
+    
+    foreach(lc, peraggs) {
+        OnlineAgg_NumericAggPerAggState *peragg = 
+            (OnlineAgg_NumericAggPerAggState *) lfirst(lc);
+        peragg->partial_resetfunc(partial_pergroups[i], peragg);
+        ++i;
+    }
+}
 
-	else if (IsA(state->join_state, AdaptiveOnlineSampleJoinState)) {
-		if (NULL == slot) {
-			i = 0;
-			foreach(lc, peraggs) {
-				OnlineAgg_NumericAggPerAggState *peragg = 
-					(OnlineAgg_NumericAggPerAggState *) lfirst(lc);
-				
-				peragg->a_transfunc(pergroups[i], peragg, 
-						PointerGetDatum(NULL), true, NULL, 0);
-				++i;
-			}
-		}
+static void
+onlineagg_advance_partial_pergroups(
+    OnlineAggState *state, 
+    TupleTableSlot *slot,
+    List *peraggs,
+    OnlineAgg_PartialNumericAggPerGroupState **partial_pergroups) {
 
-		else {
-			AdaptiveOnlineSampleJoinState *join_state = 
-				(AdaptiveOnlineSampleJoinState *) state->join_state;
-			MemoryContext oldcontext;
+	int i;
+	ListCell *lc;
+	ExprContext *econtext = state->expr_ctx;
+    MemoryContext oldcontext;
 
-			ResetExprContext(econtext);
-			econtext->ecxt_outertuple = slot;
+    Assert(NULL != slot);
+    ResetExprContext(econtext);
+    econtext->ecxt_outertuple = slot;
+    oldcontext = MemoryContextSwitchTo(econtext->ecxt_per_tuple_memory);
+    
+    i = 0;
+    foreach(lc, peraggs) {
+        OnlineAgg_NumericAggPerAggState *peragg = 
+            (OnlineAgg_NumericAggPerAggState *) lfirst(lc);
+        
+        Datum value;
+        bool isNull;
+            
+        if (peragg->expr_state != NULL) {
+            value = ExecEvalExpr(peragg->expr_state, econtext, &isNull, NULL);
+        }
+        else {
+            value = PointerGetDatum(NULL);	/* to suppress compiler warning */
+            isNull = false;
+        }
 
-			oldcontext = MemoryContextSwitchTo(econtext->ecxt_per_tuple_memory);
-			
-			i = 0;
-			foreach(lc, peraggs) {
-				OnlineAgg_NumericAggPerAggState *peragg = 
-					(OnlineAgg_NumericAggPerAggState *) lfirst(lc);
-				
-				Datum value;
-				bool isNull;
-					
-				if (peragg->expr_state != NULL) {
-					value = ExecEvalExpr(peragg->expr_state, econtext, &isNull, NULL);
-				}
-				else {
-					value = PointerGetDatum(NULL);
-					isNull = false;
-				}
+        peragg->partial_transfunc(partial_pergroups[i], peragg, value, isNull);
 
-				peragg->a_transfunc(pergroups[i], peragg,
-						value, isNull, join_state->ainfo , 
-						join_state->join_state.nrels);
+        ++i;
+    }
 
-				++i;
-			}
+    MemoryContextSwitchTo(oldcontext);
+}
 
-			MemoryContextSwitchTo(oldcontext);
-			++*nsampled;
-		}
-		
-	}
-
-	else {
-		Assert(false); /* unreachable */
-	}
+static void
+onlineagg_add_partial_pergroups_to_pergroups(
+    OnlineAggState *state,
+    List *peraggs,
+    OnlineAgg_NumericAggPerGroupState **pergroups,
+    OnlineAgg_PartialNumericAggPerGroupState **partial_pergroups,
+    uint64 *nsampled,
+    uint64 *ntotal_sampled) {
+    
+    OnlineSampleJoinState *join_state = state->join_state;
+	int i = 0;
+	ListCell *lc;
+    
+    foreach(lc, peraggs) {
+        OnlineAgg_NumericAggPerAggState *peragg = 
+            (OnlineAgg_NumericAggPerAggState *) lfirst(lc);
+        peragg->partial_finalfunc(
+            partial_pergroups[i], pergroups[i], peragg,
+            join_state->inv_prob, join_state->nrels);
+        ++i;
+    }
+    ++*nsampled;
+    ++*ntotal_sampled;
 }
 
 static TupleTableSlot *
 onlineagg_exec_planselection(OnlineAggState *state) {
 	OnlineSampleJoin *next_plan = lfirst(state->next_plan_cell);
-	TimestampTz start_time, end_time;
+	TimestampTz start_time, end_time, now_time;
 	long secs;
 	int microsecs;
 	int64 time_elapsed;
 	uint32 i;
-	uint64 nrejected = 0;
-
+    uint64 ntotal_sampled = 0;
+	uint64 nsampled = 0;
+    uint64 nrejected;
+    List *peraggs = lappend(NIL, linitial(state->peraggs));
+    OnlineAgg_NumericAggPerGroupState *pergroups[1];
+    OnlineAgg_PartialNumericAggPerGroupState *partial_pergroups[1];
+    double sample_variance;
+    double estimator_variance;
+    
+    /* XXX Do we need to maintain these pergroups/partial_pergroups in a
+     * temporary memroy context? */
 	state->next_plan_cell = lnext(state->next_plan_cell);
+    onlineagg_init_pergroups(state, peraggs, pergroups);
+    if (state->push_down_agg) {
+        onlineagg_init_partial_pergroups(state, peraggs, partial_pergroups);
+    }
 
-	start_time = GetCurrentTimestamp();
+	now_time = start_time = GetCurrentTimestamp();
+    end_time = TimestampTzPlusMilliseconds(start_time, 3000);
 	
 	for (i = 0; i < state->nInitSamples; ++i) {
-		TupleTableSlot *slot = ExecProcNode((PlanState *) state->join_state);
-		if (NULL == slot) ++nrejected;
+        TupleTableSlot *slot;
+        
+        slot = ExecProcNode((PlanState *) state->join_state);
+
+        if (state->push_down_agg && state->join_state->fetch_ready) {
+            /* If we see no non null tuple in the leaf level, 
+             * it is essentially treated as a rejected sample. */
+            bool seen_non_null = false;
+            do {
+                if (NULL != slot) {
+                    if (!seen_non_null) {
+                        onlineagg_reset_partial_pergroups(
+                            state, peraggs, partial_pergroups);
+                        if (!state->hasGrouping) {
+                            onlineagg_reset_partial_pergroups(
+                                state, state->peraggs, state->partial_pergroups);
+                        }
+                        seen_non_null = true;
+                    }
+                    onlineagg_advance_partial_pergroups(
+                        state, slot, peraggs, partial_pergroups);
+                    if (!state->hasGrouping) {
+                        onlineagg_advance_partial_pergroups(
+                            state, slot, state->peraggs, state->partial_pergroups);
+                    }
+                }
+		        slot = ExecProcNode((PlanState *) state->join_state);
+            } while (state->join_state->fetch_ready);
+
+            if (seen_non_null) {
+                onlineagg_add_partial_pergroups_to_pergroups(state, peraggs,
+                        pergroups, partial_pergroups, &nsampled, &ntotal_sampled);
+                if (!state->hasGrouping) {
+                    onlineagg_add_partial_pergroups_to_pergroups(state, state->peraggs,
+                        state->pergroups, state->partial_pergroups,
+                        &state->nsampled, &state->ntotal_sampled);
+                }
+            } else {
+                onlineagg_advance_pergroups(state, NULL, peraggs, pergroups, 
+                        &nsampled, &ntotal_sampled);
+                if (!state->hasGrouping) {
+                    onlineagg_advance_pergroups(state, NULL, state->peraggs,
+                        state->pergroups,
+                        &state->nsampled,
+                        &state->ntotal_sampled);
+                }
+            }
+        } else {
+            /* either we are not doing agg at the leaf level or 
+             * there are no tuples in the final level (a rejection) */
+            onlineagg_advance_pergroups(state, slot, peraggs, pergroups,
+                                        &nsampled, &ntotal_sampled);
+            if (!state->hasGrouping) {
+               onlineagg_advance_pergroups(state, slot, state->peraggs,
+                       state->pergroups, &state->nsampled, &state->ntotal_sampled);
+            }
+        }
+
+        if ((now_time = GetCurrentTimestamp()) >= end_time) break;
 	}
 
-	end_time = GetCurrentTimestamp();
-
-	TimestampDifference(start_time, end_time, &secs, &microsecs);
+	TimestampDifference(start_time, now_time, &secs, &microsecs);
 	time_elapsed = ((int64) secs) * 1000ll + ((int64) microsecs) / 1000ll;
-	onlineagg_output_planselection(state, next_plan, nrejected, time_elapsed);
+    calc_variance_double(pergroups[0], &sample_variance, ntotal_sampled);
+    if (sample_variance == 0.0) {
+        sample_variance = XQL_DOUBLE_INF;
+    }
+    estimator_variance = sample_variance * ((double) time_elapsed / ntotal_sampled);
+    nrejected = ntotal_sampled - nsampled;
 
-	if (state->best_plan == NULL || state->nrejected_best_plan > nrejected) {
-		state->best_plan = next_plan;
-		state->nrejected_best_plan = nrejected;
+	onlineagg_output_planselection(state, next_plan, ntotal_sampled,
+            nrejected, estimator_variance, time_elapsed);
+
+	if (state->best_plan == NULL || (
+        ntotal_sampled >= state->ntotal_sampled_best_plan * 2 ||
+        (ntotal_sampled >= state->ntotal_sampled_best_plan * 0.5 &&
+        //(nsampled * 1.0 / ntotal_sampled >= 1.5 * state->naccepted_best_plan / state->ntotal_sampled_best_plan ||
+        //(nsampled * 1.0 / ntotal_sampled >= 0.8 * state->naccepted_best_plan / state->ntotal_sampled_best_plan &&
+        state->variance_best_plan > estimator_variance))) {
+
+        state->best_plan = next_plan;
+		state->variance_best_plan = estimator_variance;
+        state->naccepted_best_plan = nsampled;
+        state->ntotal_sampled_best_plan = ntotal_sampled;
 	}
 
 	if (state->next_plan_cell == NULL) {
 		state->join_state = online_reinit_join(state->join_state, state->best_plan);
-		state->join_state->forOutputs = true;
 	}
 	else {
 		next_plan = lfirst(state->next_plan_cell);
@@ -1157,7 +1265,9 @@ onlineagg_exec_planselection(OnlineAggState *state) {
 static void
 onlineagg_output_planselection(OnlineAggState *state,
 							   OnlineSampleJoin *join_plan,
+                               uint64 ntotal_sample,
 							   uint64 nrejected,
+                               double estimator_variance,
 							   int64 time_elapsed) {
 	TupleTableSlot *slot = state->ps.ps_ResultTupleSlot;
 	int natts = slot->tts_tupleDescriptor->natts;
@@ -1171,13 +1281,16 @@ onlineagg_output_planselection(OnlineAggState *state,
 	slot->tts_values[1] = Int64GetDatumFast(time_elapsed);
 	slot->tts_isnull[1] = false;
 
-	slot->tts_values[2] = Int64GetDatumFast(state->nInitSamples);
+	slot->tts_values[2] = Int64GetDatumFast(ntotal_sample);
 	slot->tts_isnull[2] = false;
 
 	slot->tts_values[3] = Int64GetDatumFast(nrejected);
 	slot->tts_isnull[3] = false;
 
-	for (i = 4; i < natts; ++i) {
+    slot->tts_values[4] = Float8GetDatumFast(estimator_variance);
+    slot->tts_isnull[4] = false;
+
+	for (i = 5; i < natts; ++i) {
 		slot->tts_values[i] = PointerGetDatum(NULL);
 		slot->tts_isnull[i] = true;
 	}
@@ -1191,15 +1304,20 @@ ExecOnlineSampleJoin(OnlineSampleJoinState *state) {
 		   i;
 	
 	nrels = state->nrels;
-
 	ResetExprContext(state->rel_qual_ctx);
-	
+    
 	/* extract sample */
-	for (i = 1; i <= nrels; ++i) {
-		if (NULL == online_sample_from_btree(state, i)) {
-			return NULL;
-		}
-	}
+    if (!state->fetch_all_from_last || !state->fetch_ready) {
+        for (i = 1; i <= nrels; ++i) {
+            if (NULL == online_sample_from_btree(state, i)) {
+                return NULL;
+            }
+        }
+    } else {
+        if (NULL == online_sample_from_btree(state, nrels)) {
+            return NULL;
+        }
+    }
 
 	online_sample_join_set_outputs(state);
 	return state->outputs;
@@ -1216,8 +1334,6 @@ static void online_sample_join_set_outputs(OnlineSampleJoinState *state) {
 	List *output_expr_states = state->output_expr_states;
 	ExprContext *econtext = state->rel_qual_ctx;
 	MemoryContext oldcontext;
-	
-	if (!state->forOutputs) return ;
 	
 	oldcontext = MemoryContextSwitchTo(econtext->ecxt_per_tuple_memory);		
 
@@ -1245,218 +1361,6 @@ void debug_print_tups(OnlineSampleJoinState *state) {
 		debug_print_tup(state->tuples[i]);
 }
 
-TupleTableSlot *
-ExecAdaptiveOnlineSampleJoin(AdaptiveOnlineSampleJoinState *astate) {
-	OnlineSampleJoinState *state;
-	uint32 nrels,
-		   i;
-	avlnode **join_path;
-	bool has_zero;
-	bool rejected;
-	
-	state = (OnlineSampleJoinState *) astate;
-	nrels = state->nrels;
-
-	join_path = astate->join_path;
-	
-	if (astate->wtree_root == NULL) {
-		MemoryContext oldcontext = MemoryContextSwitchTo(astate->wtree_context);
-		astate->wtree_root = avl_create_node(NULL, 0.0, NULL);
-		MemoryContextSwitchTo(oldcontext);
-	}
-	join_path[0] = astate->wtree_root;
-	
-	has_zero = false;
-	rejected = false;
-
-	ResetExprContext(state->rel_qual_ctx);
-	
-	for (i = 1; i < nrels; ++i) {
-		TupleTableSlot *slot;
-		avlnode *now, *next;
-		bool sample_from_all;
-		TupleDesc tupdesc;
-		uint64 rnd;
-		
-		astate->cur_rel = i;
-		now = join_path[i-1];
-
-		if (now->data) {
-			if (now->total == 0) {
-				/* this path was explored before, no updates are needed to weights */
-				return NULL;
-			}
-			
-			rnd = xql_randint(now->total - 1);	
-			sample_from_all = (rnd >= now->seen);
-		}
-		else {
-			sample_from_all = true;
-		}
-		
-		if (sample_from_all) {
-			/* from all */
-
-			slot = online_sample_from_btree(state, i);
-			now->total = _bt_sample_get_count(state->sample_state[i]);
-
-			if (!slot && now->total != 0) {
-				/* this qual is rejected due to rel quals, have to continue anyway */
-				slot = state->tuples[i];
-				rejected = true;
-			}
-			
-			if (!slot) {
-				/* `return NULL` is a subtle bug since the weights 
-				 * have not been updated yet. */
-				Assert(now->total == 0 && now->data == NULL);
-				now->data = now;	/* this node should never be sampled later unless it's the root */
-				now->seen = 0;
-				has_zero = true;
-				break;
-			}
-			else {
-				next = avl_find(now->data, slot, online_avltree_cmp, (void *) astate);
-
-				if (next) {
-					/* old tuple */
-					astate->ainfo[i].n_total = now->total;
-					astate->ainfo[i].n_seen = now->seen;
-					astate->ainfo[i].last_was_seen = true;
-					astate->ainfo[i].weight = next->weight;
-					astate->ainfo[i].sum_weight = now->data->sum;
-				}
-				else {
-					/* new tuple */
-					MemoryContext oldcontext;
-					TupleTableSlot *key_slot;
-					HeapTuple htup_copy;
-
-					astate->ainfo[i].n_total = now->total;
-					astate->ainfo[i].n_seen = now->seen;
-					astate->ainfo[i].last_was_seen = false;
-					
-					oldcontext = MemoryContextSwitchTo(astate->wtree_context);
-
-					++now->seen;
-					key_slot = ExecAllocTableSlot(&astate->slots);
-					
-
-					/* don't pin the tupdesc for it's already pinned by state->tuples, which
-					 * has the same live period; this will save us a lot of time of releasing
-					 * the tupdescs */
-					tupdesc = RelationGetDescr(state->heaprels[i]);
-					ExecSetSlotDescriptor_nopin(key_slot, tupdesc);
-					
-					htup_copy = ExecCopySlotTuple(slot);
-					ExecStoreTuple(htup_copy, key_slot, InvalidBuffer, true);
-
-					next = avl_create_node(key_slot, 0.0, NULL);
-					now->data = avl_insert(now->data, next, 
-							online_avltree_cmp, (void *) astate);
-					
-					MemoryContextSwitchTo(oldcontext);
-				}
-			}
-		}
-
-		else {
-			/* from seen */
-			HeapTuple htup;	
-			double rnd;
-			
-			if (now->data->sum == 0) {
-				/* all tuples that are previously seen cannot join */
-				has_zero = true;
-				break;
-			}
-
-			rnd = xql_drand() * now->data->sum;
-
-			Assert(now->seen != 0);
-
-			next = avl_find_weight(now->data, rnd);
-
-			Assert(next);
-			Assert(next->weight != 0.0 || next->total == 0);
-			
-			astate->ainfo[i].n_total = now->total;
-			astate->ainfo[i].n_seen = now->seen;
-			astate->ainfo[i].last_was_seen = true;
-			astate->ainfo[i].weight = next->weight;
-			astate->ainfo[i].sum_weight = now->data->sum;
-			
-			/* store the tuple */
-			htup = ExecFetchSlotTuple(next->slot);
-			ExecStoreTuple(htup, state->tuples[i], InvalidBuffer, false);
-		}
-
-		join_path[i] = next;
-	}
-
-	/* the sample of the last relation is always sampled from the index */
-	if (!has_zero) {
-		TupleTableSlot *slot;
-
-		++astate->cur_rel;
-		Assert(astate->cur_rel = nrels);
-		slot = online_sample_from_btree(state, nrels);
-		join_path[nrels - 1]->total = 
-			_bt_sample_get_count(state->sample_state[nrels]);
-		
-		if (slot == NULL) {
-			if (join_path[nrels - 1]->total != 0) {
-				rejected = true;
-			}
-			else {
-				has_zero = true;
-			}
-		}
-		else {
-
-			astate->ainfo[i].n_total = join_path[nrels - 1]->total;
-		}
-	}
-
-	/* fix the weights along the join path */
-	if (has_zero) {
-		if (astate->cur_rel > 1)
-			avl_maintain_sum(join_path[astate->cur_rel - 1], 0.0);
-	}
-	else {
-		Assert(astate->cur_rel == nrels);
-		avl_maintain_sum(join_path[nrels - 1], join_path[nrels - 1]->total);
-	}
-	
-	if (astate->cur_rel > 2) {
-		for (i = astate->cur_rel - 2; i > 0; --i) {
-			double sum = join_path[i]->data->sum;
-			double new_weight;
-			
-			if (sum == 0) {
-				new_weight = join_path[i]->total - join_path[i]->seen;
-			}
-			else {
-				new_weight = sum * join_path[i]->total / join_path[i]->seen;
-			}
-
-			avl_maintain_sum(join_path[i], new_weight);
-		}
-	}
-
-	{
-		/* (void) validate_tree(astate->wtree_root->data); */
-	}
-
-	/* if there's rejected tuples, return NULL */
-	if (has_zero || rejected) {
-		return NULL;
-	}
-	
-	online_sample_join_set_outputs(state);
-	return state->outputs;
-}
-
 static TupleTableSlot *
 online_sample_from_btree(OnlineSampleJoinState *state, int i) {
 	Relation index = state->join_index[i];
@@ -1464,58 +1368,104 @@ online_sample_from_btree(OnlineSampleJoinState *state, int i) {
 	int n_runtime_keys = state->n_runtime_keys[i];
 	IndexRuntimeKeyInfo *runtime_keys = state->runtime_keys[i];
 	ExprContext *econtext = state->rel_qual_ctx;
+    bool should_do_sample;
+    HeapTuple htup;
+    ItemPointer tid;
+    bool is_last = i == state->nrels;
 
 	/* first invocation; need to initialize BTSampleState */
 	if (state->sample_state[i] == NULL) {
 		MemoryContext oldcontext = MemoryContextSwitchTo(state->perPlanContext);
-		state->sample_state[i] = _bt_init_sample_state(index, false);
+		state->sample_state[i] = _bt_init_sample_state(index, false,
+                is_last ? state->fetch_all_from_last : 
+                (state->sample_from_filtered && state->len_rel_quals[i] != 0));
 		MemoryContextSwitchTo(oldcontext);
 	}
 	sstate = state->sample_state[i];
-	
-	/* evaluate runtime keys */
-	if (n_runtime_keys > 0) {
-		online_eval_runtime_keys(econtext, runtime_keys, n_runtime_keys);
-		_bt_sample_set_key(sstate, state->n_joinkeys[i], state->join_keys[i]);
-	}
-	else {
-		/* no runtime keys but this is the sstate has not been set to the keys */
-		if (!_bt_sample_key_is_ok(sstate)) {
-			_bt_sample_set_key(sstate, state->n_joinkeys[i], state->join_keys[i]);
-		}
-	}
-		
-	if (!_bt_sample_key_is_ok(sstate)) {
-		ereport(ERROR, (errmsg("scankey error")));		
-	}
-	
-	if (_bt_sample(sstate)) {
-		uint64 count = _bt_sample_get_count(sstate);
-		HeapTuple htup;
+    
+    should_do_sample = !state->fetch_all_from_last || !is_last || 
+            (is_last && !state->fetch_ready);
 
-		if (count == 0) 
-			return NULL;
-		state->inv_prob[i] = count;
-		
-		htup = online_fetch_heap(state, sstate, i);	
-		Assert(htup != NULL);
+    if (should_do_sample) {
+        /* evaluate runtime keys */
+        if (n_runtime_keys > 0) {
+            online_eval_runtime_keys(econtext, runtime_keys, n_runtime_keys);
+            _bt_sample_set_key(sstate, state->n_joinkeys[i], state->join_keys[i]);
+        }
+        else {
+            /* no runtime keys but this is the sstate has not been set to the keys */
+            if (!_bt_sample_key_is_ok(sstate)) {
+                _bt_sample_set_key(sstate, state->n_joinkeys[i], state->join_keys[i]);
+            }
+        }
+            
+        if (!_bt_sample_key_is_ok(sstate)) {
+            ereport(ERROR, (errmsg("scankey error")));		
+        }
+        
+        if (!_bt_sample(sstate)) {
+            ereport(ERROR, (errmsg("error when sampling on the btree")));
+        }
 
-		ExecStoreTuple(htup,
-					   state->tuples[i],
-					   state->buf[i],
-					   false);
-			
-		if (list_length(state->rel_quals[i]) != 0) {
-				if (!ExecQual(state->rel_quals[i], econtext, false)) {
-				return NULL;
-			}
-		}
-	}
-	else {
-		ereport(ERROR, (errmsg("error when sampling on the btree")));
-	}
-	
-	return state->tuples[i];
+        if (is_last) state->fetch_ready = true;
+        state->inv_prob[i] = _bt_sample_get_inverse_probability(sstate);
+    }
+    
+    if (!is_last && state->sample_from_filtered && state->len_rel_quals[i] != 0) {
+        uint64 n_matched = 0;
+        ItemPointerData sampled_tid;
+        uint64 r;
+        for (tid = _bt_sample_get_next_tid(sstate); ItemPointerIsValid(tid);
+             tid = _bt_sample_get_next_tid(sstate)) {
+            htup = online_fetch_heap(state, tid, i);
+            Assert(htup != NULL);
+            ExecStoreTuple(htup, state->tuples[i], state->buf[i], false); 
+
+            if (ExecQual(state->rel_quals[i], econtext, false)) {
+                n_matched += 1;
+                if (n_matched == 1) {
+                    sampled_tid = *tid;
+                } else {
+                    r = xql_randint(n_matched - 1);
+                    if (r == 0) {
+                        sampled_tid = *tid;
+                    }
+                }
+            }
+        }
+        if (n_matched == 0) {
+            return NULL;
+        } else {
+            htup = online_fetch_heap(state, &sampled_tid, i);
+            ExecStoreTuple(htup, state->tuples[i], state->buf[i], false);
+            state->inv_prob[i] *= (double) n_matched;
+        }
+    } else {
+        if (is_last && state->fetch_all_from_last) {
+            tid = _bt_sample_get_next_tid(sstate); 
+            if (!ItemPointerIsValid(tid)) {
+                state->fetch_ready = false;
+                return NULL;
+            }
+        } else {
+           tid = _bt_sample_get_tid(sstate);
+           if (!ItemPointerIsValid(tid)) {
+               return NULL;
+           }
+        }
+
+        htup = online_fetch_heap(state, tid, i);	
+        Assert(htup != NULL);
+        ExecStoreTuple(htup, state->tuples[i], state->buf[i], false);
+                    
+        if (state->len_rel_quals[i] != 0) {
+            if (!ExecQual(state->rel_quals[i], econtext, false)) {
+                return NULL;
+            }
+        }
+    }
+
+    return state->tuples[i];
 }
 
 static void
@@ -1550,8 +1500,7 @@ online_eval_runtime_keys(ExprContext *econtext, IndexRuntimeKeyInfo *runtime_key
 }
 
 static HeapTuple
-online_fetch_heap(OnlineSampleJoinState *state, BTSampleState sstate, int i) {
-	ItemPointer tid = _bt_sample_get_tid(sstate);
+online_fetch_heap(OnlineSampleJoinState *state, ItemPointer tid, int i) {
 	Buffer	prev_buf = state->buf[i];
 	Buffer  cur_buf;
 	bool	got_heap_tuple;
@@ -1598,16 +1547,6 @@ ExecEndOnlineSampleJoin(OnlineSampleJoinState *state) {
 
 	nrels = state->nrels;
 
-	if (IsA(state, AdaptiveOnlineSampleJoinState)) {
-		/* don't reset these tuple tables, because the ref counts of 
-		 * decriptors are not maintained */
-		/*
-		AdaptiveOnlineSampleJoinState *astate = 
-			(AdaptiveOnlineSampleJoinState *) state;
-
-		ExecResetTupleTable(astate->slots, true); */
-	}
-
 	for (i = 1; i <= nrels; ++i) {
 		ExecClearTuple(state->tuples[i]);
 		if (BufferIsValid(state->buf[i]))
@@ -1619,49 +1558,5 @@ ExecEndOnlineSampleJoin(OnlineSampleJoinState *state) {
 		index_close(state->join_index[i], NoLock);
 	}
 	ExecClearTuple(state->outputs);
-}
-
-static int 
-online_avltree_cmp(TupleTableSlot *slot1, TupleTableSlot *slot2, void *cxt) {
-	AdaptiveOnlineSampleJoinState *astate = (AdaptiveOnlineSampleJoinState *) cxt;
-	
-	uint32 cur_rel = astate->cur_rel;
-	int j;
-	int ncols = astate->pk_ncolumns[cur_rel];
-
-	for (j = 0; j < ncols; ++j) {
-		int attno = astate->pk_attno[cur_rel][j];
-		Oid collation = astate->pk_collation[cur_rel][j];
-		FmgrInfo *fmgrinfo = &astate->pk_fmgrinfo[cur_rel][j];
-		
-		Datum d1, d2;
-		bool isnull1, isnull2;
-
-		d1 = slot_getattr(slot1, attno, &isnull1);
-		d2 = slot_getattr(slot2, attno, &isnull2);
-	
-
-		/* null <any non-null value */
-		if (isnull1) {
-			if (isnull2)
-				continue;
-			else
-				return -1;
-		}
-		else if (isnull2) {
-			return 1;	
-		}
-		else {
-			
-			int32 cmp_res = DatumGetInt32(FunctionCall2Coll(fmgrinfo,
-															collation,
-														    d1,
-															d2));
-			if (0 != cmp_res)
-				return cmp_res;
-		}
-	}
-
-	return 0;
 }
 

@@ -217,7 +217,6 @@ _bt_getroot(Relation rel, int access)
 		rootopaque->btpo_flags = (BTP_LEAF | BTP_ROOT);
 		rootopaque->btpo.level = 0;
 		rootopaque->btpo_cycleid = 0;
-		rootopaque->btpo_sum_tuple_count = 0;
 
 		/* NO ELOG(ERROR) till meta is updated */
 		START_CRIT_SECTION();

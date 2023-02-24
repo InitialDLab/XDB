@@ -1270,11 +1270,6 @@ transformFuncCall(ParseState *pstate, FuncCall *fn)
 												 EXPR_KIND_ORDER_BY));
 		}
 	}
-	//if (fn->agg_online)
-		//pstate->p_hasOnline = true;
-
-	//if (fn->agg_adaptive)
-		//pstate->p_adaptive = true;
 
 	/* ... and hand off to ParseFuncOrColumn */
 	return ParseFuncOrColumn(pstate,

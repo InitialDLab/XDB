@@ -954,8 +954,8 @@ _outOnlineSampleJoin(StringInfo str, const OnlineSampleJoin *node) {
 	WRITE_OID_ARRAY_FIELD(primary_indexid, node->nrel + 1);
 	WRITE_NODE_ARRAY_FIELD(join_quals, node->nrel + 1);
 	WRITE_NODE_ARRAY_FIELD(rel_quals, node->nrel + 1);
-
-	WRITE_BOOL_FIELD(adaptive);
+    WRITE_BOOL_FIELD(fetch_all_from_last);
+    WRITE_BOOL_FIELD(sample_from_filtered);
 }
 
 static void
@@ -968,6 +968,8 @@ _outOnlineAgg(StringInfo str, const OnlineAgg *node) {
 	WRITE_ATTRNUMBER_ARRAY_FIELD(grpColsIdx, node->numGrpCols);
 	WRITE_OID_ARRAY_FIELD(grpEqOps, node->numGrpCols);
 	WRITE_NODE_FIELD(candidate_join_plans);
+    WRITE_BOOL_FIELD(push_down_agg);
+    WRITE_BOOL_FIELD(push_down_filter);
 }
 
 static void
@@ -2226,7 +2228,7 @@ static void
 _outSelectStmt(StringInfo str, const SelectStmt *node)
 {
 	WRITE_NODE_TYPE("SELECT");
-
+  
 	WRITE_NODE_FIELD(distinctClause);
 	WRITE_NODE_FIELD(intoClause);
 	WRITE_NODE_FIELD(targetList);
@@ -2416,7 +2418,8 @@ _outQuery(StringInfo str, const Query *node)
 	WRITE_BOOL_FIELD(hasAggs);
 
 	WRITE_BOOL_FIELD(hasOnline);
-	WRITE_BOOL_FIELD(adaptive);
+    WRITE_BOOL_FIELD(allow_push_down_agg);
+    WRITE_BOOL_FIELD(allow_push_down_filter);
 	WRITE_UINT_FIELD(withTime);
 	WRITE_UINT_FIELD(confidence);
 	WRITE_UINT_FIELD(reportInterval);

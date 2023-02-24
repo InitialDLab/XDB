@@ -170,7 +170,8 @@ static void _po_flatten_expr_and_fix_ref(Expr *expr, List **p_var_list, int ngrp
 static bool _po_flatten_expr_and_fix_ref_impl(Node *node, _po_flatten_expr_and_fix_ref_context *cxt);
 static Node *_po_fix_grp_expr_refs(Node *expr, List *grpCols);
 static Node *_po_fix_grp_expr_refs_impl(Node *node, _po_fix_grp_expr_refs_context *ctx);
-static void _po_build_online_join_path(PlannerInfo *root, OnlineAgg *agg, List *flat_tlist, bool adaptive);
+static void _po_build_online_join_path(PlannerInfo *root, OnlineAgg *agg, 
+        List *flat_tlist, bool fetch_all_from_last, bool sample_from_filtered);
 static Bitmapset *_po_find_rel_set(Node *node, uint32 n);
 static bool _po_find_rel_set_impl(Node *node, _po_find_rel_set_context *cxt);
 static int _po_get_varno_if_is_var(Node *node);
@@ -181,7 +182,7 @@ static IndexOptInfo *_po_find_primary_index(List *index_opts);
 static bool _po_fix_onlinesamplejoin_refs_impl(Node *expr, _po_build_online_join_path_rel_info *relinfo);
 static int _po_find_relno_with_largest_joinseq(Node *expr, _po_build_online_join_path_rel_info *relinfo);
 static bool _po_find_relno_with_largest_joinseq_impl(Node *expr, _po_find_relno_with_largest_joinseq_context *ctx);
-static uint64 _po_get_count_from_btree(Oid indexid, List *quals) __attribute__((unused));
+/* static void _po_find_if_last_two_can_be_sort_merged(List *plans, bool allow_sort_merge_on_last_two) __attribute__((unused)); */
 
 /* entry point of online sample join plugin */
 PlannedStmt *online_planner_hook(Query *parse, int cursorOptions, 
@@ -198,7 +199,7 @@ PlannedStmt *online_planner_hook(Query *parse, int cursorOptions,
  * Generate online sample join plan for the query.
  *
  * NOTE we only support simple queries in the form as follow:
- *		SELECT [ADAPTIVE] [ONLINE] (expr of grouping cols|AGG(expr)) 
+ *		SELECT [ONLINE] (expr of grouping cols|AGG(expr)) 
  *			[, (exprs of grouping cols|AGG(expr))]
  *		FROM REL1 [, RELi]*
  *		WHERE <join conditions>
@@ -498,9 +499,18 @@ _po_create_online_plan(PlannerInfo *root) {
 		 * info of grp cols in online_agg_plan is also filled up in this proc.
 		 */
 		flat_tlist = _po_create_tlist_for_agg_and_join(root, online_agg_plan);
+        
+        /* do agg at the leaf index page of the last relation 
+         * if agg at leaf level is allowed and there's no grouping cols */
+        online_agg_plan->push_down_agg = 
+            parse->allow_push_down_agg && online_agg_plan->numGrpCols == 0;
+
+        online_agg_plan->push_down_filter =
+            parse->allow_push_down_filter && online_agg_plan->numGrpCols == 0;
 
 		/* build join path and fix references in the flat target list */
-		_po_build_online_join_path(root, online_agg_plan, flat_tlist, parse->adaptive);
+		_po_build_online_join_path(root, online_agg_plan, flat_tlist,
+                online_agg_plan->push_down_agg, online_agg_plan->push_down_filter);
 	}
 
 	return (Plan *) online_agg_plan;
@@ -769,7 +779,8 @@ _po_flatten_expr_and_fix_ref_impl(Node *node, _po_flatten_expr_and_fix_ref_conte
 
 static void
 _po_build_online_join_path(PlannerInfo *root, OnlineAgg *agg, 
-							List *flat_tlist, bool adaptive) {
+						   List *flat_tlist, bool fetch_all_from_last,
+                           bool sample_from_filtered) {
 	typedef _po_build_online_join_path_rel_info					_po_RelInfo;
 	typedef _po_build_online_join_path_commutable_qual_info		_po_CommInfo;
 
@@ -906,7 +917,9 @@ _po_build_online_join_path(PlannerInfo *root, OnlineAgg *agg,
 						/* have to commute it */
 						Oid		commute_opno = get_commutator(opexpr->opno);
 						if (!OidIsValid(commute_opno)) {
-							ereport(ERROR, (errmsg("online sample does not support general conditions")));
+              /* general condition */
+              rel_quals = lappend(rel_quals, opexpr);
+              break;
 						}
 	
 						_po_swap_scalar(Node *, larg, rarg);
@@ -919,7 +932,9 @@ _po_build_online_join_path(PlannerInfo *root, OnlineAgg *agg,
 						opexpr->opfuncid = InvalidOid;
 					}
 					else {
-						ereport(ERROR, (errmsg("online sample does not support general conditions")));
+            /* general condition */
+            rel_quals = lappend(rel_quals, opexpr);
+            break;
 					}
 
 					set = _po_find_rel_set(rarg, nrel);
@@ -940,10 +955,10 @@ _po_build_online_join_path(PlannerInfo *root, OnlineAgg *agg,
 					}
 					else {
 						/* join qual */
-						if (!OidIsValid(larg_indexid)) {
+						/*if (!OidIsValid(larg_indexid)) {
 							ereport(ERROR, (errmsg("cannot find btree index for column (%u, %u)",
 											   relinfo[larg_varno].relid, ((Var *) larg)->varattno)));
-						}
+						} // this is not possible */
 						relinfo[larg_varno].join_quals = lappend(relinfo[larg_varno].join_quals, opexpr);
 						relinfo[larg_varno].join_quals_indexid = lappend_oid(relinfo[larg_varno].join_quals_indexid, larg_indexid);
 
@@ -960,8 +975,8 @@ _po_build_online_join_path(PlannerInfo *root, OnlineAgg *agg,
 
 		} */
 		else {
-			/* TODO support general qual */
-			ereport(ERROR, (errmsg("online sample does not support join conditions other than B.x op A.y")));
+      /* general condition */
+      rel_quals = lappend(rel_quals, node);
 		}
 	}
 	
@@ -1128,7 +1143,7 @@ _po_build_online_join_path(PlannerInfo *root, OnlineAgg *agg,
 			/*
 			 * 2. try `attr op const`
 			 */
-			if (!new_path_found || cur_path->len == 0) {
+			if (!new_path_found) {
 				ListCell *lc, *lc2;
 				List* considered_indexid = NIL;
 				int prev = -1;
@@ -1175,9 +1190,9 @@ _po_build_online_join_path(PlannerInfo *root, OnlineAgg *agg,
 				}
 			}
 
-			/* 3. if there's no new path found or this is the first relation, 
+			/* 3. if there's no new path found, 
 			 * choose those with degree 0 */
-			if (!new_path_found || cur_path->len == 0)
+			if (!new_path_found)
 			for (i = cur_path->len + 1; i <= nrel; ++i) {
 				_po_path_elem_info *curinfo = &(cur_path->eleminfo[i]);
 				
@@ -1222,7 +1237,6 @@ _po_build_online_join_path(PlannerInfo *root, OnlineAgg *agg,
 		int i;
 		
 		plan->no = nplans++;
-		plan->adaptive = adaptive;
 		plan->nrel = nrel;
 		plan->relid = (Oid *) palloc(sizeof(Oid) * (nrel + 1));
 		plan->indexid = (Oid *) palloc(sizeof(Oid) * (nrel + 1));
@@ -1231,6 +1245,8 @@ _po_build_online_join_path(PlannerInfo *root, OnlineAgg *agg,
 					palloc(sizeof(IndexOptInfo *) * (nrel+1));
 		plan->primary_indexid = (Oid *) palloc(sizeof(Oid) * (nrel + 1));
 		plan->rel_quals = (List **) palloc(sizeof(List *) * (nrel + 1));
+        plan->fetch_all_from_last = fetch_all_from_last;
+        plan->sample_from_filtered = sample_from_filtered;
 
 		plan->relid[0] = InvalidOid;
 		plan->indexid[0] = InvalidOid;
@@ -1353,6 +1369,9 @@ _po_build_online_join_path(PlannerInfo *root, OnlineAgg *agg,
 		agg->candidate_join_plans = lappend(agg->candidate_join_plans, plan);
 		DELETE_PATHINFO(cur_path);
 	}
+  
+  /* find plans in which the last two can be sort merged */
+  /*_po_find_if_last_two_can_be_sort_merged(agg->candidate_join_plans, allow_sort_merge_on_last_two); */
 
 	/* clean up */
 	{
@@ -1550,8 +1569,16 @@ static IndexOptInfo *_po_find_primary_index(List *index_opts) {
 		if (isprimary) 
 			return indexopt;
 	}
+  
+  /* no primary index, use an arbitrary one instead 
+   * TODO change the name of this function to _po_find_sample_index since we
+   * do not necessarily return the primary index */
+  foreach(cl, index_opts) {
+    indexopt = (IndexOptInfo *) lfirst(cl);
+    return indexopt;
+  }
 	
-	ereport(ERROR, (errmsg("cannot find primary index")));
+	ereport(ERROR, (errmsg("cannot find any index")));
 	return NULL;
 }
 
@@ -1566,71 +1593,6 @@ _po_fix_onlinesamplejoin_refs_impl(Node *expr, _po_build_online_join_path_rel_in
 	}
 
 	return expression_tree_walker(expr, _po_fix_onlinesamplejoin_refs_impl, (void *) relinfo);
-}
-
-static uint64
-_po_get_count_from_btree(Oid indexid, List *quals) {
-	Relation index;
-	ScanKey scankeys;
-	int n_scankeys;
-	int i;
-	ListCell *lc;
-	BTSampleState samplestate;
-	uint64 count;
-	
-	index = index_open(indexid, AccessShareLock);
-
-	n_scankeys = list_length(quals);
-	scankeys = (ScanKey) palloc(n_scankeys * sizeof(ScanKeyData));
-	
-	i = 0;
-	foreach(lc, quals) {
-		OpExpr *opexpr = (OpExpr *) lfirst(lc);
-		Oid opno;
-		RegProcedure opfuncid;
-		Oid opfamily;
-		int op_strategy;
-		Oid op_lefttype;
-		Oid op_righttype;
-		Const *rightop = (Const *) lsecond(opexpr->args);
-		AttrNumber attno = 1; 
-		/* fix attno to 1 since we only operates on single attribute index, leftop->attno is not fixed at this point */
-		Datum scanvalue;
-		int flags = 0;
-
-		_po_fix_opexpr_funcid(opexpr); /* funcid could be invalid at this moment */
-		
-		opno = opexpr->opno;
-		opfuncid = opexpr->opfuncid;
-
-		if (attno < 1 || attno > index->rd_index->indnatts) {
-			elog(ERROR, "bogus index qualification");
-		}
-
-		opfamily = index->rd_opfamily[attno - 1];
-
-		get_op_opfamily_properties(opno, opfamily, false, &op_strategy, &op_lefttype, &op_righttype);
-
-		scanvalue = rightop->constvalue;
-		if (rightop->constisnull)
-			flags |= SK_ISNULL;
-
-		ScanKeyEntryInitialize(&scankeys[i], flags, attno, op_strategy, op_righttype, opexpr->inputcollid,
-				opfuncid, scanvalue);
-		++i;
-	}
-	
-	samplestate = _bt_prepare_sample_state(index, n_scankeys, scankeys, false);
-	if (!_bt_count(samplestate)) {
-		ereport(ERROR, (errmsg("error when counting using btree")));
-	}
-	count = _bt_sample_get_count(samplestate);
-
-	_bt_destroy_sample_state(samplestate);
-	pfree(scankeys);
-	index_close(index, NoLock);
-
-	return count;
 }
 
 static int 
@@ -1661,4 +1623,53 @@ _po_find_relno_with_largest_joinseq_impl(Node *expr,
 
 	return expression_tree_walker(expr, _po_find_relno_with_largest_joinseq_impl, (void *) ctx);
 }
+
+/*
+static void
+_po_find_if_last_two_can_be_sort_merged(List *plans, bool allow_sort_merge_on_last_two) {
+  ListCell *lc;
+
+  foreach(lc, plans) {
+    OnlineSampleJoin *plan = lfirst(lc);
+    ListCell *lc2;
+    int nrel = plan->nrel;
+    OpExpr *sort_merge_join_qual = NULL;
+
+    if (nrel < 2) continue;
+    foreach(lc2, plan->rel_quals[nrel]) {
+      Node *qual = (Node *) lfirst(lc2);
+
+      if (IsA(qual, OpExpr)) {
+          OpExpr *opexpr = (OpExpr *) qual;
+          int nargs = list_length(opexpr->args);
+
+          if (nargs == 2) {
+            Oid opno = opexpr->opno;
+            Node *leftarg = linitial(opexpr->args);
+            Node *rightarg = lsecond(opexpr->args);
+            if (_po_get_varno_if_is_var(leftarg) < nrel - 1) {
+              continue;
+            }
+            if (_po_get_varno_if_is_var(rightarg) < nrel - 1) {
+              continue;
+            }
+
+            if (op_mergejoinable(opno, exprType(leftarg))) {
+              sort_merge_join_qual = opexpr;
+              break;
+            }
+          }
+      }
+    }
+
+
+    plan->sort_merge_join_qual = sort_merge_join_qual;
+    plan->sort_merge_join_on_last_two = 
+      allow_sort_merge_on_last_two && (NULL != sort_merge_join_qual);
+
+    if (plan->sort_merge_join_on_last_two) {
+      plan->rel_quals[nrel] = list_delete(plan->rel_quals[nrel], sort_merge_join_qual);
+    }
+  }
+} */
 

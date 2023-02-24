@@ -349,7 +349,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 				create_generic_options alter_generic_options
 				relation_expr_list dostmt_opt_list
 
-%type <boolean> opt_adaptive opt_online
+%type <boolean> opt_online opt_allow_push_down_agg opt_allow_push_down_filter
 %type <list>	opt_fdw_options fdw_options
 %type <defelt>	fdw_option
 
@@ -526,8 +526,9 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
  */
 
 /* ordinary key words in alphabetical order */
-%token <keyword> ABORT_P ABSOLUTE_P ACCESS ACTION ADAPTIVE ADD_P ADMIN AFTER
-	AGGREGATE ALL ALSO ALTER ALWAYS ANALYSE ANALYZE AND ANY ARRAY AS ASC
+%token <keyword> ABORT_P ABSOLUTE_P ACCESS ACTION ADD_P ADMIN AFTER
+	AGGREGATE ALL ALLOW_PUSH_DOWN_AGG ALLOW_PUSH_DOWN_FILTER
+  ALSO ALTER ALWAYS ANALYSE ANALYZE AND ANY ARRAY AS ASC
 	ASSERTION ASSIGNMENT ASYMMETRIC AT ATTRIBUTE AUTHORIZATION
 
 	BACKWARD BEFORE BEGIN_P BETWEEN BIGINT BINARY BIT
@@ -9465,27 +9466,30 @@ select_clause:
  * However, this is not checked by the grammar; parse analysis must check it.
  */
 simple_select:
-			SELECT opt_adaptive opt_online opt_distinct opt_target_list
+			SELECT 
+            opt_online opt_distinct opt_target_list
 			into_clause from_clause where_clause
 			group_clause having_clause window_clause
 			withtime_clause confidence_clause
 			reportinterval_clause initsample_clause
+            opt_allow_push_down_agg opt_allow_push_down_filter
 				{
 					SelectStmt *n = makeNode(SelectStmt);
-					n->adaptive = $2;
-					n->hasOnline = ($2 || $3);
-					n->distinctClause = $4;
-					n->targetList = $5;
-					n->intoClause = $6;
-					n->fromClause = $7;
-					n->whereClause = $8;
-					n->groupClause = $9;
-					n->havingClause = $10;
-					n->windowClause = $11;
-					n->withTime = $12;
-					n->confidence = $13;
-					n->reportInterval = $14;
-					n->nInitSamples = $15;
+					n->hasOnline = $2;
+					n->distinctClause = $3;
+					n->targetList = $4;
+					n->intoClause = $5;
+					n->fromClause = $6;
+					n->whereClause = $7;
+					n->groupClause = $8;
+					n->havingClause = $9;
+					n->windowClause = $10;
+					n->withTime = $11;
+					n->confidence = $12;
+					n->reportInterval = $13;
+					n->nInitSamples = $14;
+                    n->allow_push_down_agg = $15;
+                    n->allow_push_down_filter = $16;
 					$$ = (Node *)n;
 				}
 			| values_clause							{ $$ = $1; }
@@ -9656,10 +9660,15 @@ opt_online:
 		  | /*EMPTY*/								{ $$ = FALSE; }
 		;
 
-opt_adaptive:
-		  ADAPTIVE									{ $$ = TRUE; }
-		  | /*EMPTY*/								{ $$ = FALSE; }
-		;
+opt_allow_push_down_agg:
+      ALLOW_PUSH_DOWN_AGG           { $$ = TRUE; }
+      | /* EMPTY */                 { $$ = FALSE; }
+    ;
+
+opt_allow_push_down_filter:
+      ALLOW_PUSH_DOWN_FILTER        { $$ = TRUE; }
+    | /* EMPTY */                   { $$ = FALSE; }
+    ;
 
 /* We use (NIL) as a placeholder to indicate that all target expressions
  * should be placed in the DISTINCT list during parsetree analysis.
@@ -13201,8 +13210,9 @@ type_func_name_keyword:
  * forced to.
  */
 reserved_keyword:
-			  ADAPTIVE
-			| ALL
+			  ALL
+            | ALLOW_PUSH_DOWN_AGG
+            | ALLOW_PUSH_DOWN_FILTER
 			| ANALYSE
 			| ANALYZE
 			| AND

@@ -344,9 +344,11 @@ static const int round_powers[4] = {0, 1000, 100, 10};
  * ----------
  */
 
+static void dump_numeric_impl(const char *str, Numeric num) __attribute__((unused));
+static void dump_var_impl(const char *str, NumericVar *var) __attribute__((unused));
 #ifdef NUMERIC_DEBUG
-static void dump_numeric(const char *str, Numeric num);
-static void dump_var(const char *str, NumericVar *var);
+#define dump_numeric(s, n) dump_numeric_impl(s, n)
+#define dump_var(s, v) dump_var_impl(s, v)
 #else
 #define dump_numeric(s,n)
 #define dump_var(s,v)
@@ -3524,13 +3526,11 @@ int2int4_sum(PG_FUNCTION_ARGS)
  * ----------------------------------------------------------------------
  */
 
-#ifdef NUMERIC_DEBUG
-
 /*
  * dump_numeric() - Dump a value in the db storage format for debugging
  */
 static void
-dump_numeric(const char *str, Numeric num)
+dump_numeric_impl(const char *str, Numeric num)
 {
 	NumericDigit *digits = NUMERIC_DIGITS(num);
 	int			ndigits;
@@ -3566,7 +3566,7 @@ dump_numeric(const char *str, Numeric num)
  * dump_var() - Dump a value in the variable format for debugging
  */
 static void
-dump_var(const char *str, NumericVar *var)
+dump_var_impl(const char *str, NumericVar *var)
 {
 	int			i;
 
@@ -3592,8 +3592,6 @@ dump_var(const char *str, NumericVar *var)
 
 	printf("\n");
 }
-#endif   /* NUMERIC_DEBUG */
-
 
 /* ----------------------------------------------------------------------
  *

@@ -190,19 +190,6 @@ xql_randint(uint64 high) {
 	return result;
 }
 
-extern unsigned short xql_drand_xseed[3];
-
-STATIC_IF_INLINE void xql_drand_init(void) {
-	int i;
-	for (i = 0; i < 3; ++i)
-		xql_drand_xseed[i] = random();
-}
-
-STATIC_IF_INLINE double
-xql_drand(void) {
-	return pg_erand48(xql_drand_xseed);
-}
-
 #endif
 
 #endif

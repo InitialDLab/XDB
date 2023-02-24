@@ -23,8 +23,6 @@
 #include "storage/predicate.h"
 #include "utils/tqual.h"
 
-/* TODO xlog stuff for tuple count */
-
 
 typedef struct
 {
@@ -84,8 +82,6 @@ static bool _bt_isequal(TupleDesc itupdesc, Page page, OffsetNumber offnum,
 			int keysz, ScanKey scankey);
 static void _bt_vacuum_one_page(Relation rel, Buffer buffer, Relation heapRel);
 
-static void _bt_add_parent_tuple_count(Relation rel, Buffer buf, BTStack stack,
-			bool is_root, bool is_only);
 
 /*
  *	_bt_doinsert() -- Handle insertion of a single index tuple in the tree.
@@ -754,9 +750,7 @@ _bt_insertonpg(Relation rel,
 									  newitemoff, itemsz,
 									  &newitemonleft);
 
-		/* split the buffer into left and right halves. 
-		 * _bt_split() should have properly handled the tuple
-		 * count of the newly inserted element */
+		/* split the buffer into left and right halves */
 		rbuf = _bt_split(rel, buf, cbuf, firstright,
 						 newitemoff, itemsz, itup, newitemonleft);
 		PredicateLockPageSplit(rel,
@@ -783,8 +777,6 @@ _bt_insertonpg(Relation rel,
 	}
 	else
 	{
-		bool		is_root = P_ISROOT(lpageop);
-		bool		is_only = P_LEFTMOST(lpageop) && P_RIGHTMOST(lpageop);
 		Buffer		metabuf = InvalidBuffer;
 		Page		metapg = NULL;
 		BTMetaPageData *metad = NULL;
@@ -823,11 +815,6 @@ _bt_insertonpg(Relation rel,
 		if (!_bt_pgaddtup(page, itemsz, itup, newitemoff))
 			elog(PANIC, "failed to add new item to block %u in index \"%s\"",
 				 itup_blkno, RelationGetRelationName(rel));
-
-		/* add sum tuple count since one tuple was inserted into the subtree.
-		 * The amount to add is always 1 due to the same reason below for
-		 * _bt_add_parent_tuple_count(). */
-		lpageop->btpo_sum_tuple_count += 1;
 
 		MarkBufferDirty(buf);
 
@@ -942,12 +929,7 @@ _bt_insertonpg(Relation rel,
 			_bt_relbuf(rel, metabuf);
 		if (BufferIsValid(cbuf))
 			_bt_relbuf(rel, cbuf);
-		
-		/* maintain the tuple counts in parent nodes.
-		 * The amount to add to parents' sums is always 1 even if
-		 * _bt_insertonpg() is called by _bt_insert_parent() because
-		 * only one tuple is actually inserted into the subtree. */
-		_bt_add_parent_tuple_count(rel, buf, stack, is_root, is_only);
+		_bt_relbuf(rel, buf);
 	}
 }
 
@@ -992,8 +974,6 @@ _bt_split(Relation rel, Buffer buf, Buffer cbuf, OffsetNumber firstright,
 	OffsetNumber i;
 	bool		isroot;
 	bool		isleaf;
-	uint64		l_sum_tuple_count = 0,
-				r_sum_tuple_count = 0;
 
 	/* Acquire a new page to split into */
 	rbuf = _bt_getbuf(rel, P_NEW, BT_WRITE);
@@ -1131,7 +1111,6 @@ _bt_split(Relation rel, Buffer buf, Buffer cbuf, OffsetNumber firstright,
 						 origpagenumber, RelationGetRelationName(rel));
 				}
 				leftoff = OffsetNumberNext(leftoff);
-				l_sum_tuple_count += isleaf ? 1 : index_tuple_get_count(newitem);
 			}
 			else
 			{
@@ -1143,7 +1122,6 @@ _bt_split(Relation rel, Buffer buf, Buffer cbuf, OffsetNumber firstright,
 						 origpagenumber, RelationGetRelationName(rel));
 				}
 				rightoff = OffsetNumberNext(rightoff);
-				r_sum_tuple_count += isleaf ? 1 : index_tuple_get_count(newitem);
 			}
 		}
 
@@ -1158,7 +1136,6 @@ _bt_split(Relation rel, Buffer buf, Buffer cbuf, OffsetNumber firstright,
 					 origpagenumber, RelationGetRelationName(rel));
 			}
 			leftoff = OffsetNumberNext(leftoff);
-			l_sum_tuple_count += isleaf ? 1 : index_tuple_get_count(item);
 		}
 		else
 		{
@@ -1170,7 +1147,6 @@ _bt_split(Relation rel, Buffer buf, Buffer cbuf, OffsetNumber firstright,
 					 origpagenumber, RelationGetRelationName(rel));
 			}
 			rightoff = OffsetNumberNext(rightoff);
-			r_sum_tuple_count += isleaf ? 1 : index_tuple_get_count(item);
 		}
 	}
 
@@ -1191,12 +1167,7 @@ _bt_split(Relation rel, Buffer buf, Buffer cbuf, OffsetNumber firstright,
 				 origpagenumber, RelationGetRelationName(rel));
 		}
 		rightoff = OffsetNumberNext(rightoff);
-		r_sum_tuple_count += isleaf ? 1 : index_tuple_get_count(newitem);
 	}
-
-	/* set sum tuple counts */
-	lopaque->btpo_sum_tuple_count = l_sum_tuple_count;
-	ropaque->btpo_sum_tuple_count = r_sum_tuple_count;
 
 	/*
 	 * We have to grab the right sibling (if any) and fix the prev pointer
@@ -1481,7 +1452,7 @@ _bt_split(Relation rel, Buffer buf, Buffer cbuf, OffsetNumber firstright,
  * We return the index of the first existing tuple that should go on the
  * righthand page, plus a boolean indicating whether the new tuple goes on
  * the left or right page.  The bool is necessary to disambiguate the case
- * were firstright == newitemoff.
+ * where firstright == newitemoff.
  */
 static OffsetNumber
 _bt_findsplitloc(Relation rel,
@@ -1764,19 +1735,17 @@ _bt_insert_parent(Relation rel,
 		BlockNumber bknum = BufferGetBlockNumber(buf);
 		BlockNumber rbknum = BufferGetBlockNumber(rbuf);
 		Page		page = BufferGetPage(buf);
-		Page		rpage = BufferGetPage(rbuf);
-		Page		ppage;
 		IndexTuple	new_item;
 		BTStackData fakestack;
-		IndexTuple  litem;
 		IndexTuple	ritem;
 		Buffer		pbuf;
-		BTPageOpaque lpageop = (BTPageOpaque) PageGetSpecialPointer(page);
-		BTPageOpaque rpageop = (BTPageOpaque) PageGetSpecialPointer(rpage);
 
 		if (stack == NULL)
 		{
+			BTPageOpaque lpageop;
+
 			elog(DEBUG2, "concurrent ROOT page split");
+			lpageop = (BTPageOpaque) PageGetSpecialPointer(page);
 			/* Find the leftmost page at the next level up */
 			pbuf = _bt_get_endpoint(rel, lpageop->btpo.level + 1, false);
 			/* Set up a phony stack entry pointing there */
@@ -1793,7 +1762,7 @@ _bt_insert_parent(Relation rel,
 										 PageGetItemId(page, P_HIKEY));
 
 		/* form an index tuple that points at the new right page */
-		new_item = CopyIndexTupleAndSetTupleCount(ritem, rpageop->btpo_sum_tuple_count);
+		new_item = CopyIndexTuple(ritem);
 		ItemPointerSet(&(new_item->t_tid), rbknum, P_HIKEY);
 
 		/*
@@ -1816,13 +1785,6 @@ _bt_insert_parent(Relation rel,
 		if (pbuf == InvalidBuffer)
 			elog(ERROR, "failed to re-find parent key in index \"%s\" for split pages %u/%u",
 				 RelationGetRelationName(rel), bknum, rbknum);
-	
-		/* adjust the tuple count of the item that points to the left page */
-		ppage = BufferGetPage(pbuf);
-		litem = (IndexTuple) PageGetItem(ppage, 
-										 PageGetItemId(ppage, stack->bts_offset));
-		index_tuple_set_count(litem, lpageop->btpo_sum_tuple_count);
-		MarkBufferDirty(pbuf);
 
 		/* Recursively update the parent */
 		_bt_insertonpg(rel, pbuf, buf, stack->bts_parent,
@@ -1843,8 +1805,6 @@ _bt_insert_parent(Relation rel,
  *
  * On entry, 'lbuf' must be locked in write-mode.  On exit, it is unlocked
  * and unpinned.
- *
- * TODO Also fix the tuple counts along the path.
  */
 void
 _bt_finish_split(Relation rel, Buffer lbuf, BTStack stack)
@@ -2023,23 +1983,18 @@ _bt_getstackbuf(Relation rel, BTStack stack, int access)
  *		two new children, metapage is updated and unlocked/unpinned.
  *		The new root buffer is returned to caller which has to unlock/unpin
  *		lbuf, rbuf & rootbuf.
- *
- *		Sum of tuple counts of the root is constructed by summing the counts
- *		of lbuf and rbuf.
  */
 static Buffer
 _bt_newroot(Relation rel, Buffer lbuf, Buffer rbuf)
 {
 	Buffer		rootbuf;
 	Page		lpage,
-				rpage,
 				rootpage;
 	BlockNumber lbkno,
 				rbkno;
 	BlockNumber rootblknum;
 	BTPageOpaque rootopaque;
 	BTPageOpaque lopaque;
-	BTPageOpaque ropaque;
 	ItemId		itemid;
 	IndexTuple	item;
 	IndexTuple	left_item;
@@ -2053,9 +2008,7 @@ _bt_newroot(Relation rel, Buffer lbuf, Buffer rbuf)
 	lbkno = BufferGetBlockNumber(lbuf);
 	rbkno = BufferGetBlockNumber(rbuf);
 	lpage = BufferGetPage(lbuf);
-	rpage = BufferGetPage(rbuf);
 	lopaque = (BTPageOpaque) PageGetSpecialPointer(lpage);
-	ropaque = (BTPageOpaque) PageGetSpecialPointer(rpage);
 
 	/* get a new root page */
 	rootbuf = _bt_getbuf(rel, P_NEW, BT_WRITE);
@@ -2071,27 +2024,20 @@ _bt_newroot(Relation rel, Buffer lbuf, Buffer rbuf)
 	 * Create downlink item for left page (old root).  Since this will be the
 	 * first item in a non-leaf page, it implicitly has minus-infinity key
 	 * value, so we need not store any actual key in it.
-	 * 
-	 * Tuple count is still needed.
 	 */
-	left_item_sz = MAXALIGN64(sizeof(IndexTupleData)) + sizeof(IndexTupleCountData);
-	left_item_sz = MAXALIGN(left_item_sz);
+	left_item_sz = sizeof(IndexTupleData);
 	left_item = (IndexTuple) palloc(left_item_sz);
-	left_item->t_info = left_item_sz | INDEX_HAS_TUPLE_COUNT;
+	left_item->t_info = left_item_sz;
 	ItemPointerSet(&(left_item->t_tid), lbkno, P_HIKEY);
-	index_tuple_set_count(left_item, lopaque->btpo_sum_tuple_count);
 
 	/*
 	 * Create downlink item for right page.  The key for it is obtained from
 	 * the "high key" position in the left page.
-	 *
-	 * Add the tuple count if left and right are leaves.
 	 */
 	itemid = PageGetItemId(lpage, P_HIKEY);
+	right_item_sz = ItemIdGetLength(itemid);
 	item = (IndexTuple) PageGetItem(lpage, itemid);
-	
-	right_item = CopyIndexTupleAndSetTupleCount(item, ropaque->btpo_sum_tuple_count);
-	right_item_sz = IndexTupleSize(right_item);
+	right_item = CopyIndexTuple(item);
 	ItemPointerSet(&(right_item->t_tid), rbkno, P_HIKEY);
 
 	/* NO EREPORT(ERROR) from here till newroot op is logged */
@@ -2104,8 +2050,6 @@ _bt_newroot(Relation rel, Buffer lbuf, Buffer rbuf)
 	rootopaque->btpo.level =
 		((BTPageOpaque) PageGetSpecialPointer(lpage))->btpo.level + 1;
 	rootopaque->btpo_cycleid = 0;
-	rootopaque->btpo_sum_tuple_count = lopaque->btpo_sum_tuple_count +
-									   ropaque->btpo_sum_tuple_count;
 
 	/* update metapage data */
 	metad->btm_root = rootblknum;
@@ -2202,9 +2146,6 @@ _bt_newroot(Relation rel, Buffer lbuf, Buffer rbuf)
  *		and pin on the target buffer!  Don't forget to write and release
  *		the buffer afterwards, either.
  *
- *		But the leftmost item still needs the tuple count so that we can 
- *		efficiently uniformly sample from the page.
- *
  *		The main difference between this routine and a bare PageAddItem call
  *		is that this code knows that the leftmost index tuple on a non-leaf
  *		btree page doesn't need to have a key.  Therefore, it strips such
@@ -2219,37 +2160,21 @@ _bt_pgaddtup(Page page,
 			 OffsetNumber itup_off)
 {
 	BTPageOpaque opaque = (BTPageOpaque) PageGetSpecialPointer(page);
-	IndexTuple	trunctuple = NULL;
-	bool		result = true;
+	IndexTupleData trunctuple;
 
 	if (!P_ISLEAF(opaque) && itup_off == P_FIRSTDATAKEY(opaque))
 	{
-		if (IndexTupleHasTupleCount(itup)) {
-			itemsize = MAXALIGN(MAXALIGN64(sizeof(IndexTupleData)) + 
-								sizeof(IndexTupleCountData));
-			trunctuple = (IndexTuple) palloc(itemsize);
-			*(IndexTupleData*) trunctuple = *itup;
-			trunctuple->t_info = itemsize | INDEX_HAS_TUPLE_COUNT;
-			index_tuple_set_count(trunctuple, index_tuple_get_count(itup));
-			itup = trunctuple;
-		}
-		else {
-			itemsize = sizeof(IndexTupleCountData);
-			trunctuple = (IndexTuple) palloc(itemsize);
-			*(IndexTupleData*) trunctuple = *itup;
-			trunctuple->t_info = itemsize;
-			itup = trunctuple;
-		}
+		trunctuple = *itup;
+		trunctuple.t_info = sizeof(IndexTupleData);
+		itup = &trunctuple;
+		itemsize = sizeof(IndexTupleData);
 	}
 
 	if (PageAddItem(page, (Item) itup, itemsize, itup_off,
 					false, false) == InvalidOffsetNumber)
-		result = false;
+		return false;
 
-	if (trunctuple != NULL)
-		pfree(trunctuple);
-
-	return result;
+	return true;
 }
 
 /*
@@ -2344,75 +2269,3 @@ _bt_vacuum_one_page(Relation rel, Buffer buffer, Relation heapRel)
 	 * the page.
 	 */
 }
-
-/*
- * _bt_add_parent_tuple_count() -- maintain the tuple counts in the parent node
- *
- * On entry, buf is the page in the subtree of which a new element was inserted, 
- * and we still hold a write lock. We release the lock once we find the corresponding 
- * item on the parent page. Add one to both the tuple count of the item and the sum of
- * tuple counts on the parent page.
- *
- */
-static void
-_bt_add_parent_tuple_count(Relation rel,
-						   Buffer buf,
-						   BTStack stack,
-						   bool is_root,
-						   bool is_only) {
-	while (!is_root) {
-		BlockNumber		bknum = BufferGetBlockNumber(buf);
-		BTStackData		fakestack;
-		Buffer			pbuf;
-		Page			ppage;
-		BTPageOpaque	ppageop;
-		ItemId			itemid;
-		IndexTuple		itup;
-		
-		if (stack == NULL) {
-			Page			page = BufferGetPage(buf);
-			BTPageOpaque	lpageop;
-
-			elog(DEBUG2, "concurrent ROOT split");
-
-			/* find the parent buffer */
-			lpageop = (BTPageOpaque) PageGetSpecialPointer(page);
-			pbuf = _bt_get_endpoint(rel, lpageop->btpo.level + 1, false);
-			stack = &fakestack;
-			stack->bts_blkno = BufferGetBlockNumber(pbuf);
-			stack->bts_offset = InvalidOffsetNumber;
-			stack->bts_parent = NULL;
-			_bt_relbuf(rel, pbuf);
-		}
-	
-		/* find the parent buffer and get the parent page */
-		ItemPointerSet(&(stack->bts_btentry.t_tid), bknum, P_HIKEY);
-		pbuf = _bt_getstackbuf(rel, stack, BT_WRITE);
-		ppage = BufferGetPage(pbuf);
-		ppageop = (BTPageOpaque) PageGetSpecialPointer(ppage);
-		
-		/* can release the lock of child buf now */
-		_bt_relbuf(rel, buf);
-		
-		/* update the item */
-		itemid = PageGetItemId(ppage, stack->bts_offset);
-		itup = (IndexTuple) PageGetItem(ppage, itemid);
-		Assert(IndexTupleHasTupleCount(itup));
-		index_tuple_add_count(itup, 1);
-		
-		/* update the sum */
-		ppageop->btpo_sum_tuple_count += 1;
-
-		MarkBufferDirty(pbuf);
-
-		/* update loop variables */
-		buf = pbuf;
-		is_root = P_ISROOT(ppageop);
-		is_only = P_LEFTMOST(ppageop) && P_RIGHTMOST(ppageop);
-		stack = stack->bts_parent;
-	}
-	
-	Assert(is_only);
-	_bt_relbuf(rel, buf);
-}
-

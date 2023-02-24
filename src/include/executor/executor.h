@@ -376,7 +376,6 @@ extern OnlineSampleJoinState *ExecInitOnlineSampleJoin(OnlineSampleJoin *node,
 													   EState *estate, int eflags);
 extern TupleTableSlot *ExecOnlineAgg(OnlineAggState *state);
 extern TupleTableSlot *ExecOnlineSampleJoin(OnlineSampleJoinState *state);
-extern TupleTableSlot *ExecAdaptiveOnlineSampleJoin(AdaptiveOnlineSampleJoinState *state);
 extern void ExecEndOnlineAgg(OnlineAggState *state);
 extern void ExecEndOnlineSampleJoin(OnlineSampleJoinState *state);
 

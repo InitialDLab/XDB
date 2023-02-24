@@ -3587,7 +3587,7 @@ PostgresMain(int argc, char *argv[],
 		MyProcPid = getpid();
 
 		MyStartTime = time(NULL);
-
+        
         srandom(MyProcPid ^ MyStartTime);
 	}
 

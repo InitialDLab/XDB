@@ -110,8 +110,6 @@ typedef struct BTPageState
 	uint32		btps_level;		/* tree level (0 = leaf) */
 	Size		btps_full;		/* "full" if less than this much free space */
 	struct BTPageState *btps_next;		/* link to parent level, if any */
-
-	uint64		btps_sum_tuple_count;	/* the sum of tuple counts in the subtree */
 } BTPageState;
 
 /*
@@ -257,8 +255,6 @@ _bt_blnewpage(uint32 level)
 	opaque->btpo_flags = (level > 0) ? 0 : BTP_LEAF;
 	opaque->btpo_cycleid = 0;
 
-	/* opaque->btpo_sum_tuple_count is set at the time when the page is being written out */
-
 	/* Make the P_HIKEY line pointer appear allocated */
 	((PageHeader) page)->pd_lower += sizeof(ItemIdData);
 
@@ -342,15 +338,13 @@ _bt_pagestate(BTWriteState *wstate, uint32 level)
 	state->btps_lastoff = P_HIKEY;
 	state->btps_level = level;
 	/* set "full" threshold based on level.  See notes at head of file. */
-	if (level > 1)
+	if (level > 0)
 		state->btps_full = (BLCKSZ * (100 - BTREE_NONLEAF_FILLFACTOR) / 100);
 	else
 		state->btps_full = RelationGetTargetPageFreeSpace(wstate->index,
 												   BTREE_DEFAULT_FILLFACTOR);
 	/* no parent level, yet */
 	state->btps_next = NULL;
-
-	state->btps_sum_tuple_count = 0;
 
 	return state;
 }
@@ -389,10 +383,7 @@ _bt_slideleft(Page page)
  * The main difference between this routine and a bare PageAddItem call
  * is that this code knows that the leftmost data item on a non-leaf
  * btree page doesn't need to have a key.  Therefore, it strips such
- * items down to just the item header. 
- * 
- * But the leftmost item still needs the tuple count so that we can efficiently
- * uniformly sample from the page.
+ * items down to just the item header.
  *
  * This is almost like nbtinsert.c's _bt_pgaddtup(), but we can't use
  * that because it assumes that P_RIGHTMOST() will return the correct
@@ -406,34 +397,19 @@ _bt_sortaddtup(Page page,
 			   OffsetNumber itup_off)
 {
 	BTPageOpaque opaque = (BTPageOpaque) PageGetSpecialPointer(page);
-	IndexTuple	trunctuple = NULL;
+	IndexTupleData trunctuple;
 
 	if (!P_ISLEAF(opaque) && itup_off == P_FIRSTKEY)
 	{
-		if (IndexTupleHasTupleCount(itup)) {
-			itemsize = MAXALIGN(MAXALIGN64(sizeof(IndexTupleData)) + 
-								sizeof(IndexTupleCountData));
-			trunctuple = (IndexTuple) palloc(itemsize);
-			*(IndexTupleData*) trunctuple = *itup;
-			trunctuple->t_info = itemsize | INDEX_HAS_TUPLE_COUNT;
-			index_tuple_set_count(trunctuple, index_tuple_get_count(itup));
-			itup = trunctuple;
-		}
-		else {
-			itemsize = sizeof(IndexTupleCountData);
-			trunctuple = (IndexTuple) palloc(itemsize);
-			*(IndexTupleData*) trunctuple = *itup;
-			trunctuple->t_info = itemsize;
-			itup = trunctuple;
-		}
+		trunctuple = *itup;
+		trunctuple.t_info = sizeof(IndexTupleData);
+		itup = &trunctuple;
+		itemsize = sizeof(IndexTupleData);
 	}
 
 	if (PageAddItem(page, (Item) itup, itemsize, itup_off,
 					false, false) == InvalidOffsetNumber)
 		elog(ERROR, "failed to add item to the index page");
-
-	if (trunctuple != NULL)
-		pfree(trunctuple);
 }
 
 /*----------
@@ -477,7 +453,6 @@ _bt_buildadd(BTWriteState *wstate, BTPageState *state, IndexTuple itup)
 	OffsetNumber last_off;
 	Size		pgspc;
 	Size		itupsz;
-	uint64		tuple_count;
 
 	/*
 	 * This is a handy place to check for cancel interrupts during the btree
@@ -532,7 +507,6 @@ _bt_buildadd(BTWriteState *wstate, BTPageState *state, IndexTuple itup)
 		ItemId		ii;
 		ItemId		hii;
 		IndexTuple	oitup;
-		BTPageOpaque oopaque = (BTPageOpaque) PageGetSpecialPointer(opage);
 
 		/* Create new page of same level */
 		npage = _bt_blnewpage(state->btps_level);
@@ -559,17 +533,6 @@ _bt_buildadd(BTWriteState *wstate, BTPageState *state, IndexTuple itup)
 		*hii = *ii;
 		ItemIdSetUnused(ii);	/* redundant */
 		((PageHeader) opage)->pd_lower -= sizeof(ItemIdData);
-		
-		/*
-		 * Set the sum of tuple counts on the old page.
-		 */
-		if (state->btps_level == 0) {
-			tuple_count = 1;
-		} else {
-			tuple_count = index_tuple_get_count(oitup);
-		}
-		state->btps_sum_tuple_count -= tuple_count;
-		oopaque->btpo_sum_tuple_count = state->btps_sum_tuple_count;
 
 		/*
 		 * Link the old page into its parent, using its minimum key. If we
@@ -581,7 +544,6 @@ _bt_buildadd(BTWriteState *wstate, BTPageState *state, IndexTuple itup)
 
 		Assert(state->btps_minkey != NULL);
 		ItemPointerSet(&(state->btps_minkey->t_tid), oblkno, P_HIKEY);
-		index_tuple_set_count(state->btps_minkey, state->btps_sum_tuple_count);
 		_bt_buildadd(wstate, state->btps_next, state->btps_minkey);
 		pfree(state->btps_minkey);
 
@@ -590,12 +552,7 @@ _bt_buildadd(BTWriteState *wstate, BTPageState *state, IndexTuple itup)
 		 * it off the old page, not the new one, in case we are not at leaf
 		 * level.
 		 */
-		if (state->btps_level == 0) {
-			state->btps_minkey = CopyIndexTupleAndSetTupleCount(oitup, 1);
-		}
-		else {
-			state->btps_minkey = CopyIndexTuple(oitup);
-		}
+		state->btps_minkey = CopyIndexTuple(oitup);
 
 		/*
 		 * Set the sibling links for both pages.
@@ -619,10 +576,6 @@ _bt_buildadd(BTWriteState *wstate, BTPageState *state, IndexTuple itup)
 		 * Reset last_off to point to new page
 		 */
 		last_off = P_FIRSTKEY;
-
-		/* reset the sum tuple count of next page */
-		state->btps_sum_tuple_count = tuple_count;
-
 	}
 
 	/*
@@ -634,25 +587,7 @@ _bt_buildadd(BTWriteState *wstate, BTPageState *state, IndexTuple itup)
 	if (last_off == P_HIKEY)
 	{
 		Assert(state->btps_minkey == NULL);
-		if (state->btps_level == 0) {
-			/* leaf level tuple does not have tuple count field */
-			Assert(!IndexTupleHasTupleCount(itup));
-			state->btps_minkey = CopyIndexTupleAndSetTupleCount(itup, 1);
-		}
-		else {
-			state->btps_minkey = CopyIndexTuple(itup);
-		}
-	}
-
-	/*
-	 * get the tuple count of the newly added tuple
-	 */
-	if (state->btps_level == 0) {
-		/* leaf level itup does not need to record tuple count */
-		tuple_count = 1;
-	}
-	else {
-		tuple_count = index_tuple_get_count(itup);
+		state->btps_minkey = CopyIndexTuple(itup);
 	}
 
 	/*
@@ -660,8 +595,7 @@ _bt_buildadd(BTWriteState *wstate, BTPageState *state, IndexTuple itup)
 	 */
 	last_off = OffsetNumberNext(last_off);
 	_bt_sortaddtup(npage, itupsz, itup, last_off);
-	
-	state->btps_sum_tuple_count += tuple_count;
+
 	state->btps_page = npage;
 	state->btps_blkno = nblkno;
 	state->btps_lastoff = last_off;
@@ -707,13 +641,10 @@ _bt_uppershutdown(BTWriteState *wstate, BTPageState *state)
 		{
 			Assert(s->btps_minkey != NULL);
 			ItemPointerSet(&(s->btps_minkey->t_tid), blkno, P_HIKEY);
-			index_tuple_set_count(s->btps_minkey, s->btps_sum_tuple_count);
 			_bt_buildadd(wstate, s->btps_next, s->btps_minkey);
 			pfree(s->btps_minkey);
 			s->btps_minkey = NULL;
 		}
-		
-		opaque->btpo_sum_tuple_count = s->btps_sum_tuple_count;
 
 		/*
 		 * This is the rightmost page, so the ItemId array needs to be slid

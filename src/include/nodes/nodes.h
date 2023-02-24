@@ -130,7 +130,6 @@ typedef enum NodeTag
 
 	T_OnlineAggState,
 	T_OnlineSampleJoinState,
-	T_AdaptiveOnlineSampleJoinState,
 
 	/*
 	 * TAGS FOR PRIMITIVE NODES (primnodes.h)

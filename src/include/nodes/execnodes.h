@@ -1926,8 +1926,9 @@ typedef struct OnlineAggState {
 										be selected. */
 	ListCell	*next_plan_cell;	/* the last tried plan */
 	OnlineSampleJoin *best_plan;	/* the best plan */
-	uint64		nrejected_best_plan; /* number of rejected samples of the best plan */
-
+    double      variance_best_plan; /* the estimation of the variance of the estimator for the best plan (if there are multiple aggregations, the first one is used) */
+    uint32      naccepted_best_plan; /* # of accepted path of the best plan */
+    uint32      ntotal_sampled_best_plan; /* # of total samples of the best plan */
 
 	ExprContext *expr_ctx;
 	MemoryContext aggcontext;
@@ -1955,17 +1956,19 @@ typedef struct OnlineAggState {
 	uint64 nsampled;
 	uint64 ntotal_sampled;
 	OnlineAgg_NumericAggPerGroupState **pergroups;
+    
+    bool push_down_agg;
+    bool push_down_filter;
+    OnlineAgg_PartialNumericAggPerGroupState **partial_pergroups;
 } OnlineAggState;
 
 /*
  * tuples, heaprels start from 1 (with size nrels + 1)
  * */
 typedef struct OnlineSampleJoinState {
-	PlanState	ps;				/* for NodeTag field */
+	PlanState	    ps;				/* for NodeTag field */
 	
 	bool			initialized;	/* if the state was initalized */
-	bool			forOutputs;	/* if outputs are wanted, 
-									or just rejection rate are needed */
 
 	MemoryContext	perPlanContext;	/* reset whenever the state is reinitialized */
 	
@@ -1980,40 +1983,26 @@ typedef struct OnlineSampleJoinState {
 	int				*n_joinkeys;
 	ScanKey			*join_keys;
 	List			**rel_quals;
+    int             *len_rel_quals;
 	IndexRuntimeKeyInfo **runtime_keys;
 	int				*n_runtime_keys;
 
 	ExprContext		*rel_qual_ctx;
 
 	BTSampleState	*sample_state;
-	uint64			*inv_prob;	
+	double          *inv_prob;	
 
 	Buffer			*buf;
 	HeapTupleData	*heap_tup;
 
+    bool            fetch_all_from_last; /* whether to fetch all from the 
+                                            leaf index page of the last */
+    bool            fetch_ready;        /* if the leaf page is sampled */
+
+    bool            sample_from_filtered; /* whether to fetch all that satisfy 
+                                            selection condition on the leaf page
+                                            and sample from them */
 } OnlineSampleJoinState;
-
-typedef struct AdaptiveOnlineSampleJoinState {
-	OnlineSampleJoinState join_state;
-
-	OnlineAgg_adaptive_info_t *ainfo;
-
-	bool	initialized;
-	
-	int *pk_ncolumns;
-	int **pk_attno;
-	Oid **pk_collation;
-	FmgrInfo **pk_fmgrinfo;
-	
-	uint32 cur_rel;
-
-	MemoryContext wtree_context;
-	avlnode *wtree_root;
-	List *slots;
-	
-	avlnode **join_path;
-
-} AdaptiveOnlineSampleJoinState;
 
 typedef struct OnlineAgg_NumericAggPerAggState {
 	NodeTag		type;
@@ -2022,8 +2011,12 @@ typedef struct OnlineAgg_NumericAggPerAggState {
 	
 	OnlineAgg_NumericAgg_initfunc initfunc;
 	OnlineAgg_NumericAgg_transfunc transfunc;
-	OnlineAgg_NumericAgg_adaptive_transfunc a_transfunc;
 	OnlineAgg_NumericAgg_finalfunc finalfunc;
+
+    OnlineAgg_PartialNumericAgg_initfunc partial_initfunc;
+    OnlineAgg_PartialNumericAgg_resetfunc partial_resetfunc;
+    OnlineAgg_PartialNumericAgg_transfunc partial_transfunc;
+    OnlineAgg_PartialNumericAgg_finalfunc partial_finalfunc;
 } OnlineAgg_NumericAggPerAggState;
 
 #endif   /* EXECNODES_H */

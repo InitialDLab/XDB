@@ -115,7 +115,8 @@ typedef struct Query
 
 	bool		hasAggs;		/* has aggregates in tlist or havingQual */
 	bool 		hasOnline;      /* has online in tlist */
-	bool		adaptive;		/* whether to use adaptive online sample join */
+    bool        allow_push_down_agg;
+    bool        allow_push_down_filter;
 	uint32		withTime;		/* value for with time (in ms) */
 	uint32		confidence;		/* value for CONFIDENCE (in percentage) */
 	uint32		reportInterval; /* report interval (in ms) */
@@ -310,8 +311,6 @@ typedef struct FuncCall
 	bool		agg_star;		/* argument was really '*' */
 	bool		agg_distinct;	/* arguments were labeled DISTINCT */
 	bool		func_variadic;	/* last argument was labeled VARIADIC */
-	//bool 		agg_online;		/* argument was labeled online*/
-	//bool		agg_adaptive;	/* argument was labeled adaptive */
 	struct WindowDef *over;		/* OVER clause, if any */
 	int			location;		/* token location, or -1 if unknown */
 } FuncCall;
@@ -1101,7 +1100,8 @@ typedef struct SelectStmt
 	 * These fields are used only in "leaf" SelectStmts.
 	 */
 	bool		hasOnline;		/* has online keyword (online sample join) */
-	bool		adaptive;		/* use adaptive online sample join */
+    bool        allow_push_down_agg;
+    bool        allow_push_down_filter;
 	List	   *distinctClause; /* NULL, list of DISTINCT ON exprs, or
 								 * lcons(NIL,NIL) for all (SELECT DISTINCT) */
 	IntoClause *intoClause;		/* target for SELECT INTO */

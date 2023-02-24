@@ -34,6 +34,5 @@ OnlineSampleJoinState *ExecInitOnlineSampleJoin(OnlineSampleJoin *node,
 													   EState *estate, int eflags){}
 TupleTableSlot *ExecOnlineAgg(OnlineAggState *state) {}
 TupleTableSlot *ExecOnlineSampleJoin(OnlineSampleJoinState *state) {}
-TupleTableSlot *ExecAdaptiveOnlineSampleJoin(AdaptiveOnlineSampleJoinState *state) {}
 void ExecEndOnlineAgg(OnlineAggState *state) {}
 void ExecEndOnlineSampleJoin(OnlineSampleJoinState *state) {}

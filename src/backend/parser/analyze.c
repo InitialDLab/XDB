@@ -909,7 +909,8 @@ transformSelectStmt(ParseState *pstate, SelectStmt *stmt)
 
 	qry->commandType = CMD_SELECT;
 	qry->hasOnline = stmt->hasOnline;
-	qry->adaptive = stmt->adaptive;
+    qry->allow_push_down_agg = stmt->allow_push_down_agg;
+    qry->allow_push_down_filter = stmt->allow_push_down_filter;
 	qry->withTime = stmt->withTime;
 	qry->confidence = stmt->confidence;
 	qry->reportInterval = stmt->reportInterval;

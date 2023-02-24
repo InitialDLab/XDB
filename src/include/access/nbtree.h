@@ -61,8 +61,6 @@ typedef struct BTPageOpaqueData
 	}			btpo;
 	uint16		btpo_flags;		/* flag bits, see below */
 	BTCycleId	btpo_cycleid;	/* vacuum cycle ID of latest split */
-	
-	uint64		btpo_sum_tuple_count;	/* the total number of tuples in the subtree */
 } BTPageOpaqueData;
 
 typedef BTPageOpaqueData *BTPageOpaque;
@@ -107,9 +105,8 @@ typedef struct BTMetaPageData
 #define BTPageGetMeta(p) \
 	((BTMetaPageData *) PageGetContents(p))
 
-/* change BTREE_MAGIC and BTREE_VERSION for btree with count */
 #define BTREE_METAPAGE	0		/* first page is meta */
-#define BTREE_MAGIC		0x531632	/* magic number of btree pages, was 0x053162 */
+#define BTREE_MAGIC		0x053162	/* magic number of btree pages */
 #define BTREE_VERSION	2		/* current version number */
 
 /*
@@ -444,9 +441,7 @@ typedef struct xl_btree_newroot
  *	The strategy numbers are chosen so that we can commute them by
  *	subtraction, thus:
  */
-#define BTCommuteStrategyNumber(strat)	\
-    (((strat) == BTEqualStrategyNumber) ? BTEqualStrategyNumber :   \
-     (strat + 3))
+#define BTCommuteStrategyNumber(strat)	(BTMaxStrategyNumber + 1 - (strat))
 
 /*
  *	When a new operator class is declared, we require that the user
@@ -637,31 +632,21 @@ typedef enum BTSampleStrategy {
 } BTSampleStrategy;
 
 typedef struct BTSampleStateData {
-	Relation btss_index;
-	
-	bool btss_qual_ok;
-	BTSampleStrategy btss_strategy;
+	Relation            btss_index;
+	bool                btss_qual_ok;
+	BTSampleStrategy    btss_strategy;
+	ScanKeyData         btss_keys[2];
+	bool                btss_want_itup; /* XXX index only is broken when we fetch all from the leaf page */
+	IndexTuple          btss_sample_itup;
+	TupleDesc           btss_sample_itupdesc;
+    double              btss_inverse_probability;
+	ItemPointerData     btss_sample_tid;
 
-	/* the zero-length array trick brokes when compiled by gcc 5.1 
-	 * with -O2 enabled: assignment using btss_keys[0] gets optimized 
-	 * out */
-/*	ScanKeyData	btss_keys[0];
-	ScanKeyData	btss_lowkey[0]; 
-	ScanKeyData btss_lowkey_data;
-
-	ScanKeyData	btss_highkey[0]; 
-	ScanKeyData btss_highkey_data; */
-
-	ScanKeyData btss_keys[2];
-
-	bool btss_want_itup;
-	IndexTuple btss_sample_itup;
-	TupleDesc btss_sample_itupdesc;
-	
-	bool btss_sample_offset_count_valid;
-	uint64 btss_sample_offset;/* the smallest index of the tuples that match the scankey*/
-	uint64 btss_sample_count; /* the number of tuples that match the scankey */
-	ItemPointerData btss_sample_tid;
+    /* support for fetching all from the leaf page */
+    bool                btss_sample_all_on_leaf;
+    ItemPointerData     *btss_all_tid_on_leaf;
+    int                 btss_curpos_on_leaf;
+    int                 btss_nitems_on_leaf;
 } BTSampleStateData;
 
 typedef BTSampleStateData *BTSampleState;
@@ -778,14 +763,15 @@ extern void btree_desc(StringInfo buf, uint8 xl_info, char *rec);
 /*
  * prototypes for functions in nbtsample.c
  */
-extern void _bt_validate_tuple_counts(Relation index);
-extern BTSampleState _bt_prepare_sample_state(Relation index, int nkeys, ScanKey keys,
-											  bool want_itup);
-extern BTSampleState _bt_init_sample_state(Relation index, bool want_itup);
+extern BTSampleState _bt_prepare_sample_state(Relation index, int nkeys, 
+                                              ScanKey keys, bool want_itup, 
+                                              bool sample_all_on_leaf);
+extern BTSampleState _bt_init_sample_state(Relation index, bool want_itup,
+                                           bool sample_all_on_leaf);
 extern void _bt_sample_set_key(BTSampleState state, int nkeys, ScanKey keys);
 extern bool _bt_sample(BTSampleState state);
 extern void _bt_destroy_sample_state(BTSampleState state);
-extern bool _bt_count(BTSampleState state);
+extern ItemPointer _bt_sample_get_next_tid(BTSampleState state);
 
 #define _bt_sample_key_is_ok(btsamplestate) ((btsamplestate)->btss_qual_ok)
 
@@ -793,12 +779,10 @@ extern bool _bt_count(BTSampleState state);
 	do {	\
 		BTSampleState __tmp_btss = (btsamplestate);	\
 		__tmp_btss->btss_qual_ok = false;	\
-		__tmp_btss->btss_sample_offset_count_valid = false;	\
 		ItemPointerSetInvalid(&__tmp_btss->btss_sample_tid);	\
 	} while(0)
 
-#define _bt_sample_get_offset(btsamplestate) ((btsamplestate)->btss_sample_offset);
-#define _bt_sample_get_count(btsamplestate) ((btsamplestate)->btss_sample_count)
 #define _bt_sample_get_tid(btsamplestate) (&((btsamplestate)->btss_sample_tid))
+#define _bt_sample_get_inverse_probability(btsamplestate) ((btsamplestate)->btss_inverse_probability)
 
 #endif   /* NBTREE_H */

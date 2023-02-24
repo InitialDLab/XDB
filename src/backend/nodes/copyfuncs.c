@@ -983,7 +983,8 @@ _copyOnlineSampleJoin(const OnlineSampleJoin *from) {
 	COPY_NODE_ARRAY_FIELD(List, join_quals, from->nrel + 1);
 	COPY_NODE_ARRAY_FIELD(List, rel_quals, from->nrel + 1);
 
-	COPY_SCALAR_FIELD(adaptive);
+    COPY_SCALAR_FIELD(fetch_all_from_last);
+    COPY_SCALAR_FIELD(sample_from_filtered);
 
 	return newnode;
 }
@@ -998,6 +999,8 @@ _copyOnlineAgg(const OnlineAgg *from) {
 	COPY_ATTRNUMBER_ARRAY_FIELD(grpColsIdx, from->numGrpCols);
 	COPY_OID_ARRAY_FIELD(grpEqOps, from->numGrpCols);
 	COPY_NODE_FIELD(candidate_join_plans);
+    COPY_SCALAR_FIELD(push_down_agg);
+    COPY_SCALAR_FIELD(push_down_filter);
 
 	return newnode;
 }
@@ -2561,7 +2564,8 @@ _copyQuery(const Query *from)
 	COPY_SCALAR_FIELD(hasAggs);
 
 	COPY_SCALAR_FIELD(hasOnline);
-	COPY_SCALAR_FIELD(adaptive);
+    COPY_SCALAR_FIELD(allow_push_down_agg);
+    COPY_SCALAR_FIELD(allow_push_down_filter);
 	COPY_SCALAR_FIELD(withTime);
 	COPY_SCALAR_FIELD(confidence);
 	COPY_SCALAR_FIELD(reportInterval);
@@ -2642,7 +2646,6 @@ _copySelectStmt(const SelectStmt *from)
 	SelectStmt *newnode = makeNode(SelectStmt);
 	
 	COPY_SCALAR_FIELD(hasOnline);
-	COPY_SCALAR_FIELD(adaptive);
 	COPY_NODE_FIELD(distinctClause);
 	COPY_NODE_FIELD(intoClause);
 	COPY_NODE_FIELD(targetList);

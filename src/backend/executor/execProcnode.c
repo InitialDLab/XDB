@@ -518,10 +518,6 @@ ExecProcNode(PlanState *node)
 			result = ExecOnlineSampleJoin((OnlineSampleJoinState *) node);
 			break;
 
-		case T_AdaptiveOnlineSampleJoinState:
-			result = ExecAdaptiveOnlineSampleJoin((AdaptiveOnlineSampleJoinState *) node);
-			break;
-
 		default:
 			elog(ERROR, "unrecognized node type: %d", (int) nodeTag(node));
 			result = NULL;
@@ -764,7 +760,6 @@ ExecEndNode(PlanState *node)
 			break;
 
 		case T_OnlineSampleJoinState:
-		case T_AdaptiveOnlineSampleJoinState:
 			elog(ERROR, "ExecEndOnlineSampleJoin should not be called by dispatcher");
 			break;
 

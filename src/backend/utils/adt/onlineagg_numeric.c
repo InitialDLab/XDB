@@ -36,6 +36,14 @@ makeNumericAggStateFromMemoryContext(MemoryContext agg_context, bool calcSumX2);
 static OnlineAgg_NumericAggPerGroupState *
 init_OnlineAgg_NumericAggPerGroupState(MemoryContext aggcontext,
 									   OnlineAgg_NumericAggPerAggState *peragg);
+static OnlineAgg_PartialNumericAggPerGroupState *
+init_OnlineAgg_PartialNumericAggPerGroupState(MemoryContext aggcontext,
+                                              OnlineAgg_NumericAggPerAggState *peragg);
+
+static void
+reset_OnlineAgg_PartialNumericAggPerGroupState(
+    OnlineAgg_PartialNumericAggPerGroupState *partial_pergroup,
+    OnlineAgg_NumericAggPerAggState *peragg);
 
 static PGFunction OnlineAgg_get_tonumeric_func(Oid type);
 
@@ -49,43 +57,52 @@ static void trans_OnlineAgg_sum(OnlineAgg_NumericAggPerGroupState *pergroup,
 								OnlineAgg_NumericAggPerAggState *peragg,
 								Datum value,
 								bool isZero,
-								const uint64 *inv_prob,
+								const double *inv_prob,
 								int nrels);
+static void
+trans_OnlineAgg_Partial_sum(
+    OnlineAgg_PartialNumericAggPerGroupState *partial_pergroup,
+    OnlineAgg_NumericAggPerAggState *peragg,
+    Datum value,
+    bool isZero);
 static void trans_OnlineAgg_count(OnlineAgg_NumericAggPerGroupState *pergroup,
 								  OnlineAgg_NumericAggPerAggState *peragg,
 								  Datum value,
 								  bool isZero,
-								  const uint64 *inv_prob,
+								  const double *inv_prob,
 								  int nrels);
+static void
+trans_OnlineAgg_Partial_count(
+    OnlineAgg_PartialNumericAggPerGroupState *partial_pergroup,
+    OnlineAgg_NumericAggPerAggState *peragg,
+    Datum value,
+    bool isZero);
 static void trans_OnlineAgg_common(OnlineAgg_NumericAggPerGroupState *pergroup,
 								   Numeric value,
-								   const uint64 *inv_prob,
+								   const double *inv_prob,
 								   int nrels);
+static void
+trans_OnlineAgg_Partial_common(
+    OnlineAgg_PartialNumericAggPerGroupState *partial_pergroup,
+    Numeric value);
+static void
+final_OnlineAgg_Partial_common(
+    OnlineAgg_PartialNumericAggPerGroupState *partial_pergroup,
+    OnlineAgg_NumericAggPerGroupState *pergroup,
+    OnlineAgg_NumericAggPerAggState *peragg,
+    const double *inv_prob,
+    int nrels);
+static void calc_mean_variance(
+        OnlineAgg_NumericAggPerGroupState *pergroup,
+        NumericVar *mean,
+        NumericVar *variance,
+        uint64 N);
 static void final_OnlineAgg_common(OnlineAgg_NumericAggPerGroupState *pergroup,
 								   OnlineAgg_NumericAggPerAggState *peragg,
 								   double confidence,
 								   uint64 N,
 								   Datum *p_result,
 								   Datum *p_rel_ci);
-
-static void adaptive_trans_OnlineAgg_sum(OnlineAgg_NumericAggPerGroupState *pergroup,
-										 OnlineAgg_NumericAggPerAggState *peragg,
-										 Datum value,
-										 bool isZero,
-										 OnlineAgg_adaptive_info_t *ainfo,
-										 int nrels);
-
-static void adaptive_trans_OnlineAgg_count(OnlineAgg_NumericAggPerGroupState *pergroup,
-										   OnlineAgg_NumericAggPerAggState *peragg,
-										   Datum value,
-										   bool isZero,
-										   OnlineAgg_adaptive_info_t *ainfo,
-										   int nrels);
-
-static void adaptive_trans_OnlineAgg_common(OnlineAgg_NumericAggPerGroupState *aggstate,
-											Numeric value,
-											OnlineAgg_adaptive_info_t *ainfo,
-											int nrels);
 
 static NumericAggState *
 makeNumericAggStateFromMemoryContext(MemoryContext agg_context, bool calcSumX2)
@@ -138,8 +155,12 @@ init_OnlineAgg_NumericAggPerAggState_sum(OnlineAggSum *sum) {
 	aggstate->state.expr_state = NULL;
 	aggstate->state.initfunc = init_OnlineAgg_NumericAggPerGroupState;
 	aggstate->state.transfunc = trans_OnlineAgg_sum;
-	aggstate->state.a_transfunc = adaptive_trans_OnlineAgg_sum;
 	aggstate->state.finalfunc = final_OnlineAgg_common;
+
+    aggstate->state.partial_initfunc = init_OnlineAgg_PartialNumericAggPerGroupState;
+    aggstate->state.partial_resetfunc = reset_OnlineAgg_PartialNumericAggPerGroupState;
+    aggstate->state.partial_transfunc = trans_OnlineAgg_Partial_sum;
+    aggstate->state.partial_finalfunc = final_OnlineAgg_Partial_common;
 
 	return (OnlineAgg_NumericAggPerAggState *) aggstate;
 }
@@ -177,8 +198,12 @@ init_OnlineAgg_NumericAggPerAggState_count(OnlineAggCount *count) {
 	aggstate->state.expr_state = NULL;
 	aggstate->state.initfunc = init_OnlineAgg_NumericAggPerGroupState;
 	aggstate->state.transfunc = trans_OnlineAgg_count;
-	aggstate->state.a_transfunc = adaptive_trans_OnlineAgg_count;
 	aggstate->state.finalfunc = final_OnlineAgg_common;
+
+    aggstate->state.partial_initfunc = init_OnlineAgg_PartialNumericAggPerGroupState;
+    aggstate->state.partial_resetfunc = reset_OnlineAgg_PartialNumericAggPerGroupState;
+    aggstate->state.partial_transfunc = trans_OnlineAgg_Partial_count;
+    aggstate->state.partial_finalfunc = final_OnlineAgg_Partial_common;
 
 	return (OnlineAgg_NumericAggPerAggState *) aggstate;
 }
@@ -188,6 +213,23 @@ init_OnlineAgg_NumericAggPerGroupState(MemoryContext aggcontext,
 									   OnlineAgg_NumericAggPerAggState *peragg) {
 	
 	return makeNumericAggStateFromMemoryContext(aggcontext, true);
+}
+
+static OnlineAgg_PartialNumericAggPerGroupState *
+init_OnlineAgg_PartialNumericAggPerGroupState(MemoryContext aggcontext,
+                                              OnlineAgg_NumericAggPerAggState *peragg) {
+    return makeNumericAggStateFromMemoryContext(aggcontext, false);
+}
+
+static void
+reset_OnlineAgg_PartialNumericAggPerGroupState(
+    OnlineAgg_PartialNumericAggPerGroupState *partial_pergroup,
+    OnlineAgg_NumericAggPerAggState *peragg) {
+    
+    MemoryContext context = partial_pergroup->agg_context;
+    memset(partial_pergroup, 0, sizeof(NumericAggState));
+    partial_pergroup->agg_context = context;
+    partial_pergroup->calcSumX2 = false;
 }
 
 static PGFunction 
@@ -215,7 +257,7 @@ trans_OnlineAgg_sum(OnlineAgg_NumericAggPerGroupState *pergroup,
 					OnlineAgg_NumericAggPerAggState *peragg,
 					Datum value,
 					bool isZero,
-					const uint64 *inv_prob,
+					const double *inv_prob,
 					int nrels) {
 
 	OnlineAgg_NumericAggPerAggState_sum *peragg_sum = 
@@ -228,8 +270,7 @@ trans_OnlineAgg_sum(OnlineAgg_NumericAggPerGroupState *pergroup,
 	}
 
 	if (peragg_sum->tonumeric != NULL) {
-		val = DatumGetNumeric(DirectFunctionCall1(peragg_sum->tonumeric,
-												  value));
+		val = DatumGetNumeric(DirectFunctionCall1(peragg_sum->tonumeric, value));
 	}
 	else {
 		val = DatumGetNumeric(value);
@@ -238,12 +279,37 @@ trans_OnlineAgg_sum(OnlineAgg_NumericAggPerGroupState *pergroup,
 	trans_OnlineAgg_common(pergroup, val, inv_prob, nrels);
 }
 
+static void
+trans_OnlineAgg_Partial_sum(
+    OnlineAgg_PartialNumericAggPerGroupState *partial_pergroup,
+    OnlineAgg_NumericAggPerAggState *peragg,
+    Datum value,
+    bool isZero) {
+    
+	OnlineAgg_NumericAggPerAggState_sum *peragg_sum = 
+			(OnlineAgg_NumericAggPerAggState_sum *) peragg;
+	Numeric val;
+    
+	if (isZero) {
+		++partial_pergroup->N;	
+		return ;
+	}
+
+    if (peragg_sum->tonumeric != NULL) {
+        val = DatumGetNumeric(DirectFunctionCall1(peragg_sum->tonumeric, value));
+    } else {
+        val = DatumGetNumeric(value);
+    }
+
+    trans_OnlineAgg_Partial_common(partial_pergroup, val);
+}
+
 static void 
 trans_OnlineAgg_count(OnlineAgg_NumericAggPerGroupState *pergroup,
 					  OnlineAgg_NumericAggPerAggState *peragg,
 					  Datum value,
 					  bool isZero,
-					  const uint64 *inv_prob,
+					  const double *inv_prob,
 					  int nrels) {
 	OnlineAgg_NumericAggPerAggState_count *peragg_count = 
 				(OnlineAgg_NumericAggPerAggState_count *) peragg;
@@ -256,10 +322,27 @@ trans_OnlineAgg_count(OnlineAgg_NumericAggPerGroupState *pergroup,
 	trans_OnlineAgg_common(pergroup, peragg_count->scale, inv_prob, nrels);
 }
 
+static void
+trans_OnlineAgg_Partial_count(
+    OnlineAgg_PartialNumericAggPerGroupState *partial_pergroup,
+    OnlineAgg_NumericAggPerAggState *peragg,
+    Datum value,
+    bool isZero) {
+    OnlineAgg_NumericAggPerAggState_count *peragg_count = 
+				(OnlineAgg_NumericAggPerAggState_count *) peragg;
+
+    if (isZero) {
+        ++partial_pergroup->N;
+        return ;
+    }
+
+    trans_OnlineAgg_Partial_common(partial_pergroup, peragg_count->scale);
+}
+
 static void 
 trans_OnlineAgg_common(OnlineAgg_NumericAggPerGroupState *pergroup,
 					   Numeric value,
-					   const uint64 *inv_prob,
+					   const double *inv_prob,
 					   int nrels) {
 	NumericVar var;
 	NumericVar tmp;
@@ -285,6 +368,51 @@ trans_OnlineAgg_common(OnlineAgg_NumericAggPerGroupState *pergroup,
 
 	free_var(&tmp);
 	free_var(&var);
+}
+
+static void
+trans_OnlineAgg_Partial_common(
+    OnlineAgg_PartialNumericAggPerGroupState *partial_pergroup,
+    Numeric value) {
+
+    NumericVar var;
+    init_var(&var);
+
+    if (NUMERIC_IS_NAN(value)) {
+        set_var_from_var(&const_nan, &var);
+    } else {
+        set_var_from_num(value, &var);
+    }
+
+    do_numericvar_accum(partial_pergroup, &var);
+
+    free_var(&var);
+}
+
+static void
+final_OnlineAgg_Partial_common(
+    OnlineAgg_PartialNumericAggPerGroupState *partial_pergroup,
+    OnlineAgg_NumericAggPerGroupState *pergroup,
+    OnlineAgg_NumericAggPerAggState *peragg,
+    const double *inv_prob,
+    int nrels) {
+    
+    int i;
+    NumericVar var;
+    NumericVar tmp;
+    init_var(&var);
+    init_var(&tmp);
+    
+    set_var_from_var(&partial_pergroup->sumX, &var);
+    for (i = 1; i <= nrels; ++i) {
+        double_to_numericvar(inv_prob[i], &tmp);
+		mul_var(&var, &tmp, &var, var.dscale + tmp.dscale);
+    }
+
+    do_numericvar_accum(pergroup, &var);
+    
+    free_var(&var);
+    free_var(&tmp);
 }
 
 static void
@@ -321,6 +449,22 @@ calc_mean_variance(
     free_var(&tmp);
 }
 
+void
+calc_variance_double(
+        OnlineAgg_NumericAggPerGroupState *pergroup,
+        double *p_variance,
+        uint64 N) {
+    NumericVar variance;
+    if (N <= 1) {
+        *p_variance = XQL_DOUBLE_INF;
+    } else {
+        init_var(&variance);
+        calc_mean_variance(pergroup, NULL, &variance, N);
+        *p_variance = numericvar_to_double_no_overflow(&variance);
+        free_var(&variance);
+    }
+}
+
 static void 
 final_OnlineAgg_common(OnlineAgg_NumericAggPerGroupState *pergroup,
 					   OnlineAgg_NumericAggPerAggState *peragg,
@@ -351,7 +495,7 @@ final_OnlineAgg_common(OnlineAgg_NumericAggPerGroupState *pergroup,
 	*p_result = NumericGetDatum(make_result(&var));
 
 	if (tmp.ndigits == 0 || tmp.digits[0] == 0) {
-		/* result == 0, report 0 */
+		/* result == 0, report zero */
 		*p_rel_ci = NumericGetDatum(make_result(&const_zero));
 	} else {
         init_var(&tmp2);
@@ -382,102 +526,4 @@ final_OnlineAgg_common(OnlineAgg_NumericAggPerGroupState *pergroup,
 	free_var(&tmp);
 	free_var(&var);
 }
-
-static void 
-adaptive_trans_OnlineAgg_sum(OnlineAgg_NumericAggPerGroupState *pergroup,
-							 OnlineAgg_NumericAggPerAggState *peragg,
-							 Datum value,
-							 bool isZero,
-						 	 OnlineAgg_adaptive_info_t *ainfo,
-							 int nrels) {
-
-	OnlineAgg_NumericAggPerAggState_sum *peragg_sum = 
-			(OnlineAgg_NumericAggPerAggState_sum *) peragg;
-	Numeric val;
-
-	if (isZero) {
-		++pergroup->N;
-		return ;
-	}
-
-	if (peragg_sum->tonumeric != NULL) {
-		val = DatumGetNumeric(DirectFunctionCall1(peragg_sum->tonumeric,
-												  value));
-	}
-	else {
-		val = DatumGetNumeric(value);
-	}
-
-	adaptive_trans_OnlineAgg_common(pergroup, val, ainfo, nrels);
-}
-
-static void 
-adaptive_trans_OnlineAgg_count(OnlineAgg_NumericAggPerGroupState *pergroup,
-							   OnlineAgg_NumericAggPerAggState *peragg,
-							   Datum value,
-							   bool isZero,
-							   OnlineAgg_adaptive_info_t *ainfo,
-							   int nrels) {
-
-	OnlineAgg_NumericAggPerAggState_count *peragg_count = 
-				(OnlineAgg_NumericAggPerAggState_count *) peragg;
-
-	if (isZero) {
-		++pergroup->N;
-		return ;
-	}
-	
-	adaptive_trans_OnlineAgg_common(pergroup, peragg_count->scale, ainfo, nrels);
-}
-
-static void
-adaptive_trans_OnlineAgg_common(OnlineAgg_NumericAggPerGroupState *pergroup,
-								Numeric value,
-								OnlineAgg_adaptive_info_t *ainfo,
-								int nrels) {
-	
-	NumericVar var;
-	NumericVar tmp;
-	int i;
-	double multiplier;
-
-	init_var(&var);
-	init_var(&tmp);
-
-	if (NUMERIC_IS_NAN(value)) {
-		set_var_from_var(&const_nan, &var);
-	}
-	else {
-		set_var_from_num(value, &var);	
-
-		for (i = 1; i <= nrels - 1; ++i) {
-			if (ainfo[i].last_was_seen) {
-				/* var *= total / ((seen * w) / sum_w + 1 - seen / total) */
-				multiplier = ainfo[i].n_total / 
-					(((double) ainfo[i].n_seen) * ainfo[i].weight / ainfo[i].sum_weight
-					 + 1.0 - ((double) ainfo[i].n_seen) / ainfo[i].n_total);
-			}
-			else {
-				/* var *= total * total / (total - seen) */
-				multiplier = ((double) ainfo[i].n_total) * 
-					(((double) ainfo[i].n_total) / (ainfo[i].n_total - ainfo[i].n_seen));
-			}
-
-			Assert(!xql_isnan(multiplier));
-
-			double_to_numericvar(multiplier, &tmp);
-			mul_var(&var, &tmp, &var, var.dscale + tmp.dscale);
-
-		}
-
-		uint8_to_numericvar(ainfo[nrels].n_total, &tmp);
-		mul_var(&var, &tmp, &var, var.dscale + tmp.dscale);
-	}
-
-	do_numericvar_accum(pergroup, &var);
-
-	free_var(&tmp);
-	free_var(&var);
-}
-
 

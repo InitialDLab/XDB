@@ -176,7 +176,7 @@ btbuildCallback(Relation index,
 	/* form an index tuple and point it at the heap tuple */
 	itup = index_form_tuple(RelationGetDescr(index), values, isnull);
 	itup->t_tid = htup->t_self;
-	
+
 	/*
 	 * insert the index tuple into the appropriate spool file for subsequent
 	 * processing

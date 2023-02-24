@@ -44,6 +44,7 @@ static int	_bt_compare_array_elements(const void *a, const void *b, void *arg);
 static bool _bt_compare_scankey_args(IndexScanDesc scan, ScanKey op,
 						 ScanKey leftarg, ScanKey rightarg,
 						 bool *result);
+/*static bool _bt_fix_scankey_strategy(ScanKey skey, int16 *indoption);*/
 static void _bt_mark_scankey_required(ScanKey skey);
 static bool _bt_check_rowcompare(ScanKey skey,
 					 IndexTuple tuple, TupleDesc tupdesc,
@@ -1170,14 +1171,14 @@ _bt_compare_scankey_args_noscandesc(Relation rel, ScanKey op,
 }
 
 /*
- * Wrapper to the external version of _bt_compare_scankey_args.
+ * Wrapper to the external version of _bt_compare_scankey_args_noscandesc.
  */
 static bool
 _bt_compare_scankey_args(IndexScanDesc scan, ScanKey op,
-						 ScanKey leftarg, ScanKey rightarg,
-						 bool *result) {
-	return _bt_compare_scankey_args_noscandesc(scan->indexRelation, op,
-						leftarg, rightarg, result);
+                        ScanKey leftarg, ScanKey rightarg,
+                        bool *result) {
+    return _bt_compare_scankey_args_noscandesc(scan->indexRelation, op,
+            leftarg, rightarg, result);
 }
 
 /*

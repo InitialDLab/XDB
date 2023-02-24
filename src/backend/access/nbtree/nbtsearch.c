@@ -1544,32 +1544,6 @@ _bt_get_endpoint(Relation rel, uint32 level, bool rightmost)
 }
 
 /*
- * _bt_get_endpoint() -- Find the first or last page on a given tree level
- *
- * If the index is empty, we will return InvalidBuffer; any other failure
- * condition causes ereport().  We will not return a dead page.
- *
- * The returned buffer is pinned and read-locked.
-Buffer
-_bt_get_endpoint(Relation rel, uint32 level, bool rightmost) {
-	return _bt_get_endpoint_impl(rel, level, rightmost, BT_READ);
-} */
-
-/*
- * _bt_get_endpoint_with_access() -- Find the first or last page on a given tree level
- *
- * If the index is empty, we will return InvalidBuffer; any other failure
- * condition causes ereport().  We will not return a dead page.
- *
- * The returned buffer is pinned and locked according to the given access.
- *
-Buffer
-_bt_get_endpoint_with_access(Relation rel, uint32 level, bool rightmost, int access) {
-	return _bt_get_entpoint_impl(rel, level, rightmost, access);
-} */
-
-
-/*
  *	_bt_endpoint() -- Find the first or last page in the index, and scan
  * from there to the first key satisfying all the quals.
  *

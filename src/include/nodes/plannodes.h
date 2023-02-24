@@ -896,8 +896,8 @@ typedef struct OnlineSampleJoin {
 	IndexOptInfo **primaryindex_info;
 	List		**join_quals;	/* the array of the join conditions (can be NIL) */
 	List		**rel_quals;	/* the array of additional per relation constraints (can be NIL) */
-
-	bool		adaptive;		/* whether to use adaptive online sample join */
+    bool        fetch_all_from_last; /* whether to fetch all tuples from the leaf index page of the last relation */
+    bool        sample_from_filtered; /* whether to sample from the results filtered by selection condition */
 } OnlineSampleJoin;
 
 typedef struct OnlineAggSum {
@@ -914,14 +914,17 @@ typedef struct OnlineAggCount {
 } OnlineAggCount;
 
 typedef struct OnlineAgg {
-	Plan				plan;
+	Plan			plan;
 	
-	//OnlineSampleJoin	*join;	
-	int					numGrpCols;		/* no. of grouping columns */
-	AttrNumber			*grpColsIdx;	/* index of grouping columns into join tlist */
-	Oid					*grpEqOps;		/* equality operators of grouping columns */
+	int				numGrpCols;		/* no. of grouping columns */
+	AttrNumber		*grpColsIdx;	/* index of grouping columns into join tlist */
+	Oid				*grpEqOps;		/* equality operators of grouping columns */
 
-	List				*candidate_join_plans;	/* all candidate join plans */
+	List			*candidate_join_plans;	/* all candidate join plans */
+    bool            push_down_agg;  /* whether to perform agg on the last level page */
+    bool            push_down_filter; /* whether to filter on last btree page and 
+                                         sample from those that satisfy the selection 
+                                         conditions */
 } OnlineAgg;
 
 #endif   /* PLANNODES_H */
