@@ -1,1 +1,0 @@
-src/backend/lib/ilist.o src/backend/lib/binaryheap.o src/backend/lib/stringinfo.o

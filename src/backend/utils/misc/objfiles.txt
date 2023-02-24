@@ -1,1 +1,0 @@
-src/backend/utils/misc/guc.o src/backend/utils/misc/help_config.o src/backend/utils/misc/pg_rusage.o src/backend/utils/misc/ps_status.o src/backend/utils/misc/rbtree.o src/backend/utils/misc/superuser.o src/backend/utils/misc/timeout.o src/backend/utils/misc/tzparser.o src/backend/utils/misc/xql_math.o
