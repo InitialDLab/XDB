@@ -14048,4 +14048,21 @@ parser_init(base_yy_extra_type *yyext)
 #undef yylval
 #undef yylloc
 
+/*
+ * NOTE(02/24/23): newer bison defines yylex as base_yylex, which conflicts
+ * with flex. We know at least 3.8.2 has the issue but I haven't investigated
+ * when the change has taken place.
+ *
+ * XXX(zy): I'm adding a warning here in case this is a bison version I don't
+ * know if yylex is defined differently.
+ */
+#if YYBISON >= 30802
+#ifdef yylex
+#undef yylex
+#endif
+#elif YYBISON >= 30000
+#error "blah"
+#warning "Newer bison may not be compatible with PG 9.4.2 parser, see src/backend/parser/gram.y for workarounds."
+#endif
+
 #include "scan.c"

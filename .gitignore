@@ -1,0 +1,12 @@
+*.o
+*.so
+GNUmakefile
+config.status
+config.log
+objfiles.txt
+*.a
+src/backend/parser/gram.h
+src/backend/parser/gram.c
+src/backend/parser/scan.c
+*.pc
+*.so.*
