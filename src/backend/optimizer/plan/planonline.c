@@ -175,7 +175,7 @@ static Bitmapset *_po_find_rel_set(Node *node, uint32 n);
 static bool _po_find_rel_set_impl(Node *node, _po_find_rel_set_context *cxt);
 static int _po_get_varno_if_is_var(Node *node);
 static Oid _po_find_btindex_on_single_attr(RelOptInfo *reloptinfo, AttrNumber attrno);
-static IndexOptInfo *_po_find_primary_index(List *index_opts);
+static IndexOptInfo *_po_find_some_index(List *index_opts);
 #define _po_fix_onlinesamplejoin_refs(expr, relinfo) \
 	if ((expr) != NULL) _po_fix_onlinesamplejoin_refs_impl((Node *) expr, relinfo)
 static bool _po_fix_onlinesamplejoin_refs_impl(Node *expr, _po_build_online_join_path_rel_info *relinfo);
@@ -817,7 +817,7 @@ _po_build_online_join_path(PlannerInfo *root, OnlineAgg *agg,
 		relinfo[i].joinseq = -1;
 		relinfo[i].comminfo = NIL;
 		relinfo[i].reloptinfo = rtable_reloptinfo[rtf->rtindex];
-		relinfo[i].primaryindex_info = _po_find_primary_index(relinfo[i].reloptinfo->indexlist);
+		relinfo[i].primaryindex_info = _po_find_some_index(relinfo[i].reloptinfo->indexlist);
 		relinfo[i].primary_indexid = relinfo[i].primaryindex_info->indexoid;
 		++i;
 	}
@@ -1531,14 +1531,21 @@ _po_fix_agginfo_expr_ref_impl(Node *node, _po_fix_agginfo_expr_ref_context *ctx)
 	return expression_tree_walker(node, _po_fix_agginfo_expr_ref_impl, ctx);
 }
  */
-static IndexOptInfo *_po_find_primary_index(List *index_opts) {
+static IndexOptInfo *_po_find_some_index(List *index_opts) {
 	ListCell *cl;
 	IndexOptInfo *indexopt;
 	HeapTuple indexTuple;
 	bool isprimary;
+    IndexOptInfo *first_btree_indexopt = NULL;
 
 	foreach(cl, index_opts) {
 		indexopt = (IndexOptInfo *) lfirst(cl);
+
+        if (indexopt->relam != BTREE_AM_OID)
+            continue;
+
+        if (first_btree_indexopt == NULL)
+            first_btree_indexopt = indexopt;
 		
 		indexTuple = SearchSysCache1(INDEXRELID, ObjectIdGetDatum(indexopt->indexoid));	
 		if (!HeapTupleIsValid(indexTuple)) {
@@ -1546,13 +1553,14 @@ static IndexOptInfo *_po_find_primary_index(List *index_opts) {
 		}
 		isprimary = ((Form_pg_index) GETSTRUCT(indexTuple))->indisprimary;
 		ReleaseSysCache(indexTuple);
-
+        
 		if (isprimary) 
 			return indexopt;
 	}
-	
-	ereport(ERROR, (errmsg("cannot find primary index")));
-	return NULL;
+    
+    if (!first_btree_indexopt)
+	    ereport(ERROR, (errmsg("cannot find any B-tree index")));
+	return first_btree_indexopt;
 }
 
 static bool
